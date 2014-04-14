@@ -1,0 +1,393 @@
+
+#----------------------------------------------------------------------------
+# ********* RMAN backups script	low-level subroutines rman_backup.ksh.subs **
+#
+# This subscript includes low-level functions used by rman_backup.ksh
+#
+#
+
+# ******** Functions:								***************
+
+
+#-------------------------------------------
+
+function archive_log_current {
+	if [ "x$DG" = "xDG" ]; then
+		#If we are here, then it is a standby database.
+		#TODO: check. looks like 11.2.0.4+ tries to switchlog on primary automatically!?
+		dosql pridb 'SELECT PRIMARY_DB_UNIQUE_NAME FROM V$DATABASE'
+		if [ "x$pridb" = "x" ]; then
+			echo "WARN: There is no value in v$database.PRIMARY_DB_UNIQUE_NAME for $db database."
+			echo "Did this database ever received redo from primary database? Read http://goo.gl/CiV9Tl for PRIMARY_DB_UNIQUE_NAME"
+			echo "Continuing backup, but *** THIS HAS TO BE FIXED ***"
+			return
+		fi
+		echo "INFO: Current primary database is $pridb. Will issue ALTER SYSTEM ARCHIVE LOG CURRENT there."
+		dblogin="/@$pridb"	#assuming you already saved Oracle Wallet for this currently primary database
+	else
+		#it's primary, so archive log switch should be done locally.
+		unset dblogin
+	fi
+	dosql noreturn "ALTER SYSTEM ARCHIVE LOG CURRENT" $dblogin
+	#TODO: ORA-16014: log xx sequence# xxx not archived, no available destinations
+	#	 	should be ignored (especially for MODE=ARCH - archive log backups)
+	#		This could happen e.g. if there is no space available but we 
+	#				have to run arch log backup anyway...
+}
+
+#----------------------------------------------------------------------------
+
+function prepare_channels {
+	if [ $Ver10up -ne 1 ]; then
+		#For 9i databases only (no FRA):
+		mkdir -p $ONDISK_LOCATION/$db
+		eval "CH_FORMAT=\"FORMAT '$BACKUP_FORMAT'\""		#eval() to expand $db and $tags
+	fi
+
+	c=1; while [[ $c -le $1 ]]
+	do
+		RMAN_CHANNELS="$RMAN_CHANNELS
+			ALLOCATE $2 CHANNEL ch$c $ALLOCATE_PARMS $CH_FORMAT;
+			SETLIMIT CHANNEL ch$c $CHANNEL_SETLIMIT;"
+		RMAN_RELEASE_CHANNELS="$RMAN_RELEASE_CHANNELS
+			RELEASE CHANNEL ch$c;"
+		(( c=c+1 ))
+	done
+}
+
+#maintenance channels are used by CHANGE, DELETE and CROSSCHECK commands.
+function prepare_maintenance_channels {
+	#see ML Note 567555.1
+	#  and http://docs.oracle.com/cd/B19306_01/backup.102/b14194/rcmsynta005.htm
+
+	#no release for maintenance channels
+	RMAN_RELEASE_CHANNELS=""
+
+	#maintenance channel type DISK is always allocated:
+	RMAN_CHANNELS="ALLOCATE CHANNEL FOR MAINTENANCE TYPE DISK;"
+
+	if [ $BACKUP_TYPE != 'DISK' ]; then
+		#SBT only if needed:
+		RMAN_CHANNELS="$RMAN_CHANNELS
+			ALLOCATE CHANNEL FOR MAINTENANCE $ALLOCATE_PARMS;"
+	fi
+}
+
+#----------------------------------------------------------------------------
+
+function dosql {
+	typeset -n retvar=$1
+	login=${3:-/as sysdba}
+	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus $login about to run: $2"
+	retvar=$( $ORACLE_HOME/bin/sqlplus -S "$login" <<EOF
+set echo off head off feed off newpage none pagesize 1000 linesize 200
+$2;
+exit;
+EOF
+		)
+	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
+}
+
+#-------------------------------------------
+
+#This function is used to limit RMAN's ability to hog CPU
+# (especially helpful when used with bzip2 compression - 10g default)
+function renice_rman {
+	sleep $RENICE_WAIT	#wait for all rman channels to start up
+	dosql PIDS "
+		select p.spid  from  v\$session s join v\$process p on (s.paddr = p.addr)
+		where  lower(s.client_info) like 'rman%'
+		   and lower(s.program)     like 'rman@%'  
+		   and lower(s.module)      like 'backup%'
+		   and s.logon_time>sysdate-($RENICE_WAIT+120)/86400"
+	PIDS2=`echo "$PIDS\c" | tr "\n" ","`
+	if [ "x$PIDS2" = "x" ]; then
+		echo "WARN: renice_rman() could not detect active RMAN sessions. RENICE_WAIT is too small?"
+	else
+		echo $PIDS | xargs re$NICE
+		echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
+		echo "List of RMAN related processes with PIDs $PIDS2:"
+		ps -o pid,nice,user,time,comm,args -p $PIDS2
+	fi
+}
+
+#-------------------------------------------
+
+function get_database_info
+{	#1. get Oracle release number
+	dosql Release "SELECT SUBSTR(V,1,INSTR(v,'.')-1) FROM (SELECT MIN(V) V FROM (SELECT distinct(version) v FROM PRODUCT_COMPONENT_VERSION))"
+	echo "INFO: Major release of the database $db is $Release."
+	Ver10up=1
+	if [ "$Release" -le "9" ] ; then
+		Ver10up=0
+		echo "INFO: FRA is not supported in Oracle 9."
+	fi
+	
+	#2. get database DG role
+	#-- cut out first word - e.g. "physical" and keep only 'PRIMARY' or 'STANDBY'
+	dosql DB_ROLE "select SUBSTR(r,INSTR(r,' ')+1) from (select database_role r from v\$database)"
+	echo "INFO: Database Role: $DB_ROLE"
+}
+
+#-------------------------------------------
+
+function email {
+	subject=$1
+	mailx -s "$db@`hostname` $subject *****" $DBA_EMAIL
+	echo "INFO: email with subject '$subject' sent to $DBA_EMAIL at `date`"
+}
+
+#-------------------------------------------
+
+function check_FRA {
+	NO_FRA="10"			#no fra return code
+	FRA_THRESHOLD=$1	#first parameter
+
+	[ $Ver10up -ne 1 ] && return 0		#there is no FRA in pre-10g
+
+	dosql FRA_PRC_USED_SOFT 'SELECT round(space_used*100/space_limit,0) pct FROM V$RECOVERY_FILE_DEST'
+	dosql FRA_PRC_USED_HARD 'SELECT round((space_used-space_reclaimable)*100/space_limit,0) pct FROM V$RECOVERY_FILE_DEST'
+
+	if [ "x$FRA_PRC_USED_SOFT" = "x" ] ; then
+		echo "ERROR: Can't detect Flash Recovery Area for $db."
+		email "Can not detect FRA" <<EMAIL
+		Can't detect Flash Recovery Area for $db.
+		
+		The DB_RECOVERY_FILE_DEST and DB_RECOVERY_FILE_DEST_SIZE init params must be set.
+		
+		http://download.oracle.com/docs/cd/B19306_01/backup.102/b14192/setup005.htm : 
+			"Use of the flash recovery area is STRONGLY recommended"
+EMAIL
+		return $NO_FRA
+	fi
+	echo "INFO: FLASH RECOVERY AREA is ${FRA_PRC_USED_SOFT}% FULL (including reclaimable space)"
+	echo "INFO: FLASH RECOVERY AREA is ${FRA_PRC_USED_HARD}% FULL (minus reclaimable space)"
+	if [ $FRA_PRC_USED_HARD -ge $FRA_THRESHOLD ] ; then
+		dosql FRA_USAGE 'set head on echo on
+                SELECT * FROM V$FLASH_RECOVERY_AREA_USAGE'
+		email "flash_recovery_area is ${FRA_PRC_USED_HARD}% FULL" <<EMAIL
+		This is a WARNING.
+		FLASH RECOVERY AREA of $db@`hostname` database is ${FRA_PRC_USED_HARD}% FULL.
+
+		Components consuming recovery area space:
+$FRA_USAGE
+EMAIL
+	fi
+}
+
+#-------------------------------------------
+
+function check_and_email_results {
+	rman_ignore_regex="WARNING: |RMAN-005(69|71): ==="
+	#List of RMAN errors to ignore: 1) all warnings;
+	#and 2) RMAN-00571 and RMAN-00569 are just used for RMAN error stack header (formatting)
+
+	#3) for Commvault, also ignore RMAN-06525: RMAN retention policy is set to none
+	#					and RMAN-03002: failure of report command
+	[ "x$BACKUP_TYPE" = 'xCommvault' ] &&
+		rman_ignore_regex="$rman_ignore_regex|RMAN-0(3002|6525)"
+
+	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: RMAN errors to ignore regexp=$rman_ignore_regex"
+
+	#count number of RMAN errors:
+	errcount=`egrep "RMAN-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |wc -l`
+	if [ $errcount -ne 0 ] ; then
+		echo "Errors ($errcount) detected in $db rman backup"
+		email "RMAN errors" <<EMAIL
+	Log file $LOGFILE
+	Errors:
+`egrep "(RMAN|ORA)-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |tail -15`
+
+	RMAN script used:
+	$SCRIPT
+
+First 100 lines from the log file:
+
+`head -100 $LOGFILE`
+
+....
+EMAIL
+		return
+	fi
+
+	#rest of the subroutine assumes no RMAN/ORA errors
+	case $MODE in
+		ARCH)		;;	#no "ok" emails for archived log backups
+		XCHK) #email for crosscheck and report results:
+				email "IMPORTANT: database recoverability reports!" <<EMAIL
+Here are the main reports that show database recoverability and RMAN backups status:
+
+`egrep -v "found to be 'AVAILABLE'|backup piece handle=|validation succeeded for archived log|archived log file name=" $LOGFILE`
+
+For more details look at log file $LOGFILE on `hostname`.
+EMAIL
+			;;
+		*)	#email for all normal FULL/INCR backups:
+				email "RMAN backup complete" <<EMAIL
+Last $TAIL_LINES lines from log file $LOGFILE:
+
+....
+`tail -$TAIL_LINES $LOGFILE`
+EMAIL
+			;;
+	esac
+}
+
+#-------------------------------------------
+
+function check_simul_run {
+	rmans=`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$) " | wc -l`
+	# $$ - assuming default ps -ef prints both pid and ppid
+
+	if [ $rmans -gt 1 ] ; then
+                echo "WARNING: more than 1 active RMAN script is running"
+                email "RMAN scripts schedule overlap" <<EMAIL
+        Log file $LOGFILE
+	Exiting...
+        Other RMAN scripts running: $rmans
+`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$) "`
+EMAIL
+		exit 1
+	fi
+	#TODO: exclude scripts running rman crosscheck (as this may take a while)?
+}
+
+#-------------------------------------------
+
+function report_runtime {
+	S2=$SECONDS
+	typeset -i minutes
+	minutes=$(( ($S2 - $S1)/60 ))
+	seconds=$(( ($S2 - $S1)%60 ))
+	echo "== Backup script took $minutes minutes $seconds seconds to complete."
+}
+
+#-------------------------------------------
+
+function parse_params {
+	eval set -A params $(echo $db | tr ':' ' ')
+	db=${params[0]}
+	DG=${params[1]}
+}
+
+#-------------------------------------------
+
+function clean_global_vars {
+	unset DB_ROLE SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
+	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES
+	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
+	unset p c S1 S2 params minutes seconds errcount rman_debug clone_script dt
+	#global variables not to clean: DG
+	export PATH=$orig_PATH:$PATHS
+}
+
+#-------------------------------------------
+
+function set_oraenv {
+	ORACLE_SID=$db
+	ORAENV_ASK=NO
+	. oraenv
+}
+
+#-------------------------------------------
+
+function standby_offload_message_arch {
+	echo "INFO: $db is part of DG cluster and is NOT running STANDBY instance at this node now."
+	echo "INFO: Backup-related operations should run on standby databases only to offload primary database. Exiting."
+}
+function standby_offload_message_db {
+	echo "INFO: $db is part of DG cluster. Only control file and spfile backups will run on primary instance instead of database backups."
+}
+
+#-------------------------------------------
+
+function remove_old_files {
+	echo "Deleting old log files..."
+	find $BASE_PATH/log \(    -mtime +65 -name "rmanbackup*.log" \
+						   -o -mtime +4  -name "rmanbackup*.rman-trace" \
+						 \) -print -exec rm {} \;
+	find $BASE_PATH/scripts \(   -name "rmanclone_*.sh" \
+							  -o -name "*.*-bkpcopy" \
+						 \) -mtime +65 -print -exec rm {} \;
+}
+
+#-------------------------------------------
+
+function generate_clone_script {
+	#See http://docs.oracle.com/cd/B19306_01/backup.102/b14191/rcmdupdb.htm#i1008888
+	#see ddc-oraprd-db1a:oracle:DB701> more /prdora/oraarch/prdbor/flash_recovery_area/PRDBOR/backupset/2013_12_30/clone_prdbor.cmd
+	#	for example of what type of clone script to generate.
+
+	RMAN_CHANNELS=; RMAN_RELEASE_CHANNELS=
+	prepare_channels 2 AUXILIARY
+	
+	#In all below SQLs 
+	#   DECODE(SUBSTR(d.name,1,1), '+', SUBSTR(d.name,1,INSTR(d.name,'/')-1), d.name||'-new')
+	#used to leave on DG part if ASM is used, otherwise adds "-new" to a filename
+	
+	dosql CLONE_DATANAMES "SELECT '	SET NEWNAME FOR DATAFILE '''||d.name||''' to '''||
+			DECODE(SUBSTR(d.name,1,1), '+', SUBSTR(d.name,1,INSTR(d.name,'/')-1), d.name||'-new')
+			||''';  -- '||t.name||', datafile#'||file#    
+		FROM v\$datafile d JOIN v\$tablespace t ON (t.ts#=d.ts#)  
+		ORDER BY t.name, file#"
+	dosql CLONE_TEMPNAMES "SELECT '	SET NEWNAME FOR TEMPFILE '''||name||''' to '''||
+			DECODE(SUBSTR(name,1,1), '+', SUBSTR(name,1,INSTR(name,'/')-1), name||'-new')
+			||''';  -- tempfile#'||file#  
+		FROM v\$tempfile ORDER BY file#;
+		
+		select '	SET UNTIL TIME \"to_date('''||to_char(SYSDATE,'Mon DD YYYY HH24:MI:SS')||''',''Mon DD YYYY HH24:MI:SS'')\";' from dual"
+	dosql CLONE_LOGNAMES "SET SERVEROUTPUT ON size 100000
+DECLARE		l_member pls_integer := 1;  -- current member # in a group  
+BEGIN
+        dbms_output.put_line('	LOGFILE ');
+        FOR r IN (SELECT lf.group#, l.bytes/1024/1024 mb, l.members
+                       , DECODE(SUBSTR(lf.member,1,1), '+', SUBSTR(lf.member,1,INSTR(lf.member,'/')-1), lf.member||'-new') f
+                  FROM v\$logfile lf, v\$log l 
+                  WHERE lf.group# = l.group# AND lf.type='ONLINE'   -- skip standby logs
+                  ORDER BY lf.group#, member)
+        LOOP    dbms_output.put( CASE WHEN l_member=1 THEN 
+									case when r.group#=1 then  '	  ' else '	, ' end 
+									|| 'GROUP ' || TO_CHAR(r.group#) || ' ('
+								 ELSE   ', '
+								 END         || ''''||r.f||'''');
+                l_member := l_member +1;
+                IF l_member -1 = r.members THEN
+                        dbms_output.put_line(') SIZE ' || TO_CHAR(r.mb) || 'M ');
+                        l_member := 1;
+                END IF;
+        END LOOP;
+END;
+/
+select null from dual where 1=0
+"
+
+	clone_script=$BASE_PATH/scripts/rmanclone_${db}_`date '+%Y%m%d'`.sh
+	cat <<CLONESCRIPT > $clone_script
+#!/bin/sh
+
+{
+export ORACLE_SID=${db}new
+export ORAENV_ASK=NO
+. oraenv
+
+#-- target is source database ($db) to be cloned
+#-- auxiliary is a new database (${db}new) cloned out of target database
+
+\$ORACLE_HOME/bin/rman target sys/<sys_password>@$db auxiliary / <<RMANSCRIPT
+$RMAN_INIT
+RUN {	$RMAN_CHANNELS
+
+$CLONE_DATANAMES
+
+$CLONE_TEMPNAMES
+
+	DUPLICATE TARGET DATABASE TO ${db}new
+$CLONE_LOGNAMES
+	;
+}
+RMANSCRIPT
+} 2>&1 > $clone_script.log
+
+CLONESCRIPT
+	echo "INFO: RMAN clone script generated as $clone_script"
+}

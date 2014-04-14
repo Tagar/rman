@@ -1,0 +1,99 @@
+
+#------------------------------------------------------------------
+# DOCUMENTATION											***********
+#------------------------------------------------------------------
+
+# *** Frequently Asked Questions **********************************
+<<FAQ
+#------------------------------------------------------------------
+Q1. How do I schedule backups?
+A1. Add following entries into crontab (e.g. crontab -e):
+		 At least 2 cron entries are required to take DB backup
+		 and archive log backups (FULL+ARCH),
+		 or 3 records in manual scheduling mode (FULL+INCR+ARCH).
+	Also, schedule XCHK crontab entry to run crosschecks and reports.
+Q2. How do I add passwords to Oracle Wallet?
+A2. mkstore -wrl $TNS_ADMIN -createCredential TNSname username password
+	See complete setup description in ORACLEWALLET section below.
+    Oracle 10g and 11g wallets aren't compatible. Create one per OH.
+Q3. Which entries I should add to Oracle Wallet?
+A3. Add at least RMAN catalog user (if using RMAN catalog).
+    In DG setup, also add system's password of the other node.
+Q4. Which version of Oracle has Oracle Wallet functionality.
+A4. Versions of Oracle 10g and up come with support of OW.
+FAQ
+
+# *** Best practices **********************************************
+<<BESTPRACTICES
+#------------------------------------------------------------------
+ 1. Make sure you have at least 45 days of control files retention period (even if using rman catalog):
+	ALTER SYSTEM SET CONTROL_FILE_RECORD_KEEP_TIME=45 SCOPE=BOTH;  
+	Precise formula: CONTROL_FILE_RECORD_KEEP_TIME = retention period + level 0 backup interval + 1 (per 397269.1 Note).
+ 2.1. FRA must be configured. Script assumes its extistence on 10g+ databases.
+ 2.2. In 10g+ don't specify LOG_ARCHIVE_DEST_x destination explicitly, instead use USE_DB_RECOVERY_FILE_DEST:
+      e.g. LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST'
+   otherwise Oracle will not consider archive logs as FRA-managed and will not clean them under space pressure.
+      (For details check 829755.1) This is especially important on DG - we don't run arch log backups on primary db.
+ 3. If using custom archive_log_format, always include %s,%t and %r (read http://goo.gl/7RUPTQ for details).
+ 4. Always use spfiles, so init parameters can be backed up automatically.
+ 5. $BASE_PATH should be in a separate filesystem from old of your Oracle Homes.
+BESTPRACTICES
+
+# *** Complete Oracle Wallet setup steps **************************
+<<ORACLEWALLET
+#------------------------------------------------------------------
+1. Create a private sqlnet.ora for oracle user ~/.sqlnet.ora (change /home/oracle to a real path):
+	$ cat >> $TNS_ADMIN/sqlnet.ora <<EOHD
+#== Oracle Wallet Configuratiob below == do no remove this and following lines
+WALLET_LOCATION =
+   (SOURCE=(METHOD=FILE)(METHOD_DATA=(DIRECTORY=$TNS_ADMIN)))
+SQLNET.WALLET_OVERRIDE = TRUE
+SSL_CLIENT_AUTHENTICATION = FALSE
+SSL_VERSION = 0
+#== 
+EOHD
+
+2. Create the Wallet:
+	$ mkstore -create -wrl $TNS_ADMIN
+	It will ask for a new Oracle Wallet password twice - make sure you'll keep it in a secure place.
+
+3. Add as many TNS entries into Oracle Wallet as needed.
+3.1. RMAN Catalog password (if you're using catalog), e.g. 
+	$ mkstore -wrl $TNS_ADMIN -createCredential rmanc rman11 Password
+		where rmanc - TNS name that will be used by this script and referred in cataloguid variable above,
+			  rman11 - rman catalog user, and Password - is password of this user.
+3.2. If using Data Guard - add also following two entries
+	$ mkstore -wrl $TNS_ADMIN -createCredential TnsThisNode sys SysPassword
+	$ mkstore -wrl $TNS_ADMIN -createCredential TnsOtherNode sys SysPassword
+		where TnsOtherNode - TNS name (from tnsnames.ora) that will be to connect to the other node
+				in DG setup to do ARCHIVE LOG CURRENT there,
+			make sure to use user SYS and not SYSTEM for TnsThisNode.
+
+4. Try that Oracle Wallet setup is complete:
+	$ sqlplus /@rmanc   or   $ sqlplus /@TnsOtherNode
+		in both cases it should not ask you for a password and you should be able to login to database.
+
+For more information regarding Oracle Wallet read http://docs.oracle.com/cd/E11882_01/network.112/e16543/authentication.htm#DBSEG30253
+ORACLEWALLET
+
+# *** Script versions history *************************************
+<<VERSIONHISTORY
+#------------------------------------------------------------------
+ v.1	Oct 2011 Dautkhanov		First version;
+ v.2	Aug 2012 Dautkhanov		Ported to work with CommVault backups;
+ v.3	May 2013 Dautkhanov		DataGuard version (run from standby only);
+ v.4	Aug 2013 Dautkhanov		More generic version (plus on-disk backups etc), big refactoring,
+									run ctrl file backups on primary also, add separate crosscheck operation;
+ v.5	Aug 2013 Dautkhanov 	No cleartext passwords - using Oracle Wallet to store all of them;
+ v.6	Aug 2013 Dautkhanov 	Adding support for 9i databases;
+ v.7	Sep 2013 Dautkhanov		Split script into 3 different - main, vars, subs; start using oraenv;
+ v.8	Dec 2013 Dautkhanov		Added XCHK (crosscheck) as a separate script command;
+ v.9	Jan 2014 Dautkhanov		Generate RMAN clone script;
+VERSIONHISTORY
+
+# *** Known Bugs **************************************************
+<<KNOWNBUGS
+1. See Known RMAN - Dataguard Problems (Doc ID 357759.1) for details.
+1.1. E.g., there is a bug in pre-11.2.0.4/pre-12c databases 
+		- Archives get deleted on the primary even when DELETION POLICY TO APPLIED ON STANDBY
+KNOWNBUGS

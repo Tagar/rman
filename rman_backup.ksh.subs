@@ -289,14 +289,8 @@ function set_oraenv {
 	. oraenv
 }
 
-#-------------------------------------------
-
-function standby_offload_message_arch {
-	echo "INFO: $db is part of DG cluster and is NOT running STANDBY instance at this node now."
-	echo "INFO: Backup-related operations should run on standby databases only to offload primary database. Exiting."
-}
-function standby_offload_message_db {
-	echo "INFO: $db is part of DG cluster. Only control file and spfile backups will run on primary instance instead of database backups."
+function standby_offload_message {
+	echo "INFO: $db is part of DG cluster. Only control file and spfile backups will run on primary instance instead."
 }
 
 #-------------------------------------------

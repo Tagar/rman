@@ -113,7 +113,9 @@ function DO_RMAN_BACKUP {
 
 	p=$BACKUP_PARALLELISM
 	case $MODE in
-			ARCH)	backup_archive_logs 		
+			ARCH)	backup_archive_logs
+					#Do more frequent control file backups in case of PITR to an older incarnation:
+					backup_control_and_spfile
 					;;
 			CTRL)	# this mode is only used in DG mode - will run control file backup on *primary* : 
 					backup_control_and_spfile	;	p=1	
@@ -247,7 +249,7 @@ do
 
 		if [ "x$MODE" = 'xXCHK' ]; then
 			if [ "x$DG" = 'xDG'  -a  "x$DB_ROLE" = 'xPRIMARY' ]; then
-						standby_offload_message_db
+						standby_offload_message
 						echo "INFO: Exiting."
 						continue	#next database
 			fi
@@ -263,21 +265,16 @@ do
 				#   to primary, rman fails at Standby with ORA-20079: Full Resync From Primary Database Is Not Done (Doc ID 1604302.1)"
 				rman_target="/@$db"
 
-				case "$DB_ROLE.$MODE" in
-					PRIMARY.ARCH)
-						standby_offload_message_arch
-						continue	#next database
-						;;
-					PRIMARY.*)	
+				if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
 						#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
 						#This could lead to standby having different retention policy from primary.
 						RMAN_HEADER_SCRIPT="$RMAN_HEADER_SCRIPT
 							$RMAN_PRI_CONFIGURES"
 
-						standby_offload_message_db
+						standby_offload_message
+						echo "INFO: Backup type change: $MODE -> CTRL"
 						MODE="CTRL"		#primary DG db: will run only control and spfile file backups
-						;;
-				esac
+				fi
 			fi
 
 			echo "INFO: Backup type: $MODE $DG"

@@ -17,8 +17,15 @@ A2. mkstore -wrl $TNS_ADMIN -createCredential TNSname username password
 	See complete setup description in ORACLEWALLET section below.
     Oracle 10g and 11g wallets aren't compatible. Create one per OH.
 Q3. Which entries I should add to Oracle Wallet?
-A3. Add at least RMAN catalog user (if using RMAN catalog).
-    In DG setup, also add system's password of the other node.
+A3. Add at least RMAN catalog user (if using RMAN catalog)
+	and local database's SYS password.
+    In DG setup, also add SYS's password of the other node.
+	For example,
+	mkstore -wrl $TNS_ADMIN -createCredential rmanc rmanuser password1
+	mkstore -wrl $TNS_ADMIN -createCredential TNSa sys password2
+	mkstore -wrl $TNS_ADMIN -createCredential TNSb sys password3
+	, where TNSa=SIDa of the local database instance, and TNSb=SIDb 
+	of the remote (Data Guard) database.
 Q4. Which version of Oracle has Oracle Wallet functionality.
 A4. Versions of Oracle 10g and up come with support of OW.
 FAQ
@@ -29,20 +36,20 @@ FAQ
  1. Make sure you have at least 45 days of control files retention period (even if using rman catalog):
 	ALTER SYSTEM SET CONTROL_FILE_RECORD_KEEP_TIME=45 SCOPE=BOTH;  
 	Precise formula: CONTROL_FILE_RECORD_KEEP_TIME = retention period + level 0 backup interval + 1 (per 397269.1 Note).
- 2.1. FRA must be configured. Script assumes its extistence on 10g+ databases.
+ 2.1. FRA must be configured. Script assumes its existence on 10g+ databases.
  2.2. In 10g+ don't specify LOG_ARCHIVE_DEST_x destination explicitly, instead use USE_DB_RECOVERY_FILE_DEST:
       e.g. LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST'
    otherwise Oracle will not consider archive logs as FRA-managed and will not clean them under space pressure.
       (For details check 829755.1) This is especially important on DG - we don't run arch log backups on primary db.
  3. If using custom archive_log_format, always include %s,%t and %r (read http://goo.gl/7RUPTQ for details).
  4. Always use spfiles, so init parameters can be backed up automatically.
- 5. $BASE_PATH should be in a separate filesystem from old of your Oracle Homes.
+ 5. $BASE_PATH should be in a separate filesystem from all of your Oracle Homes.
 BESTPRACTICES
 
 # *** Complete Oracle Wallet setup steps **************************
 <<ORACLEWALLET
 #------------------------------------------------------------------
-1. Create a private sqlnet.ora for oracle user ~/.sqlnet.ora (change /home/oracle to a real path):
+1. Adjust sqlnet.ora in $TNS_ADMIN/sqlnet.ora (you should use separate OW for each OH):
 	$ cat >> $TNS_ADMIN/sqlnet.ora <<EOHD
 #== Oracle Wallet Configuratiob below == do no remove this and following lines
 WALLET_LOCATION =
@@ -72,6 +79,14 @@ EOHD
 4. Try that Oracle Wallet setup is complete:
 	$ sqlplus /@rmanc   or   $ sqlplus /@TnsOtherNode
 		in both cases it should not ask you for a password and you should be able to login to database.
+		
+5.1. Oracle Wallet files can be copied over to another servers. This is especially useful
+   in case of running RMAN in a cluster. So you can create a wallet on one node and copy
+   over to the rest of a cluster. E.g.:
+	$ scp ?wallet.* anothernode:`pwd`
+5.2. If you see this as a security risk, then Oracle Wallet can be created without ability 
+   to be used on other servers. Use orapki command then instead of mkstore:
+	$ orapki wallet create -wallet $TNS_ADMIN -pwd "walletpwd" -auto_login_local
 
 For more information regarding Oracle Wallet read http://docs.oracle.com/cd/E11882_01/network.112/e16543/authentication.htm#DBSEG30253
 ORACLEWALLET

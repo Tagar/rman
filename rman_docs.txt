@@ -1,0 +1,19 @@
+
+* Why not to use control file autobackup backups?
+	RMAN not Choosing the Correct Controlfile Autobackup to Restore and Failing with RMAN-06095 (Doc ID 1326114.1)
+* Why control file backups along with archived log backups?
+	In case of PITR as of an older incarnation - a control file from previous incarnation
+		may be required.
+* Doc ID 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
+  and Doc ID 291469.1
+	Change some of the RMAN CONFIGURE settings only on primary
+* Doc ID 1604302.1
+	Use TNS to connect to primary and standby, not just target=/
+* Doc ID 567555.1
+	On RMAN maintenance channels
+* Doc ID 315098.1
+	On FRA warning levels
+
+RMAN in RAC environment
+	http://docs.oracle.com/cd/E11882_01/rac.112/e41960/rman.htm#RACAD321
+	

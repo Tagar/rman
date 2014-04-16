@@ -5,8 +5,8 @@
 #------------------------------------------------------------------
 # ********* RMAN backups script	 	rman_backup.ksh ***************
 #
-# See Script Functionality, Version History and other documentation 
-# sections at the end of this script.
+# See rman_backup.info for Script Functionality, Version History 
+# and other documentation.
 #
 # Supported - Oracle releases: tested on 9i, 10g and 11g databases;
 #     		- platforms: Linux, AIX 5.1+, HP-UX 11.11+;
@@ -32,7 +32,7 @@ where <operation> is one of
 
 	<SID> may be optionallly followed by :DG which means that this is a DataGuarded database,
 	and backup should run only from standby to offload primary database.
-	If you do this, then also add other node's system's password to Oracle Wallet.
+	If you do this, then add both nodes' SYS passwords to Oracle Wallet.
 	
 	See rman_backup.info for more information.
 USAGE
@@ -124,6 +124,20 @@ function DO_RMAN_BACKUP {
 	esac
 
 	prepare_channels $p
+
+	if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
+		#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
+		#This could lead to standby having different retention policy from primary.
+		SCRIPT="$RMAN_PRI_CONFIGURES
+				$SCRIPT"
+		if [ "x$DG" = 'xDG' ]; then
+			SCRIPT="$RMAN_PRI_CONFIGURES_DG
+						$SCRIPT"
+		else
+			SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY CLEAR;
+						$SCRIPT"
+		fi
+	fi
 
 	SCRIPT="$RMAN_INIT
 RUN {	$RMAN_HEADER_SCRIPT
@@ -220,6 +234,7 @@ LOGFILE0=$BASE_PATH/log/rmanbackup_`date '+%Y%m'`.log
 		FULL|INCR|DB|ARCH|XCHK)	eval "script_mode_$1";;
 		*)					usage;;
 	esac
+	orig_MODE=$MODE
 
 	if [ "x$MODE" = "xARCH" ]; then
 		#We don't want to have too many rman processes accumulating.
@@ -241,43 +256,33 @@ do
 
 	#-----------------------------------------------
 	{	echo "===== Starting $MODE for $db @ `date`...."
-		clean_global_vars
-		set_oraenv
+		reset_global_vars
 		get_database_info
 
-		S1=$SECONDS
+		if [ "x$DG" = 'xDG' ]; then
+			#for DG databases we should connect using TNS (not just target=/), see Doc ID 1604302.1
+			rman_target="/@$db"
 
-		if [ "x$MODE" = 'xXCHK' ]; then
-			if [ "x$DG" = 'xDG'  -a  "x$DB_ROLE" = 'xPRIMARY' ]; then
-						standby_offload_message
+			if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
+					echo "INFO: $db is part of DG cluster. Standby database will be used for backup activities."
+
+					if [ "x$MODE" = 'xXCHK' ]; then
 						echo "INFO: Exiting."
 						continue	#next database
+					else
+						echo "INFO: Backup type change: $MODE -> CTRL"
+						echo "INFO: Only control file and spfile backups will run on primary instance."
+						MODE="CTRL"		#primary DG db: will run only control and spfile file backups
+					fi
 			fi
+		fi
 
+		echo "INFO: Backup type: $MODE $DG"
+
+		if [ "x$MODE" = 'xXCHK' ]; then
 			DO_BACKUP_CROSSCHECK
 
 		else   #-- all other (non-crosscheck) backup operations:
-
-			rman_target="/"
-
-			if [ "x$DG" = 'xDG' ]; then
-				#to DG databases we should connect using login/password, see "After new files are added 
-				#   to primary, rman fails at Standby with ORA-20079: Full Resync From Primary Database Is Not Done (Doc ID 1604302.1)"
-				rman_target="/@$db"
-
-				if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
-						#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
-						#This could lead to standby having different retention policy from primary.
-						RMAN_HEADER_SCRIPT="$RMAN_HEADER_SCRIPT
-							$RMAN_PRI_CONFIGURES"
-
-						standby_offload_message
-						echo "INFO: Backup type change: $MODE -> CTRL"
-						MODE="CTRL"		#primary DG db: will run only control and spfile file backups
-				fi
-			fi
-
-			echo "INFO: Backup type: $MODE $DG"
 
 			if [ $BACKUP_COMPRESS -eq 1  -a  $Ver10up -eq 1 ]; then
 				compressed="AS COMPRESSED BACKUPSET"

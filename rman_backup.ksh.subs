@@ -122,7 +122,7 @@ function get_database_info
 		Ver10up=0
 		echo "INFO: FRA is not supported in Oracle 9."
 	fi
-	
+
 	#2. get database DG role
 	#-- cut out first word - e.g. "physical" and keep only 'PRIMARY' or 'STANDBY'
 	dosql DB_ROLE "select SUBSTR(r,INSTR(r,' ')+1) from (select database_role r from v\$database)"
@@ -212,7 +212,7 @@ EMAIL
 
 	#rest of the subroutine assumes no RMAN/ORA errors
 	case $MODE in
-		ARCH)		;;	#no "ok" emails for archived log backups
+		ARCH|CTRL)		;;	#no "ok" emails for archived logs and control file backups
 		XCHK) #email for crosscheck and report results:
 				email "IMPORTANT: database recoverability reports!" <<EMAIL
 Here are the main reports that show database recoverability and RMAN backups status:
@@ -272,25 +272,23 @@ function parse_params {
 
 #-------------------------------------------
 
-function clean_global_vars {
+function reset_global_vars {
 	unset DB_ROLE SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
 	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES
 	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
 	unset p c S1 S2 params minutes seconds errcount rman_debug clone_script dt
-	#global variables not to clean: DG
+	#Global variables not to clean: DG
+	#
 	export PATH=$orig_PATH:$PATHS
-}
+	MODE=$orig_MODE
+	#
+	S1=$SECONDS
+	rman_target="/"
 
-#-------------------------------------------
-
-function set_oraenv {
+	#Use Oracle's oraenv to set oracle environment variables for current SID
 	ORACLE_SID=$db
 	ORAENV_ASK=NO
 	. oraenv
-}
-
-function standby_offload_message {
-	echo "INFO: $db is part of DG cluster. Only control file and spfile backups will run on primary instance instead."
 }
 
 #-------------------------------------------
@@ -309,10 +307,8 @@ function remove_old_files {
 
 function generate_clone_script {
 	#See http://docs.oracle.com/cd/B19306_01/backup.102/b14191/rcmdupdb.htm#i1008888
-	#see ddc-oraprd-db1a:oracle:DB701> more /prdora/oraarch/prdbor/flash_recovery_area/PRDBOR/backupset/2013_12_30/clone_prdbor.cmd
-	#	for example of what type of clone script to generate.
 
-	RMAN_CHANNELS=; RMAN_RELEASE_CHANNELS=
+	unset RMAN_CHANNELS RMAN_RELEASE_CHANNELS
 	prepare_channels 2 AUXILIARY
 	
 	#In all below SQLs 
@@ -367,7 +363,7 @@ export ORAENV_ASK=NO
 #-- target is source database ($db) to be cloned
 #-- auxiliary is a new database (${db}new) cloned out of target database
 
-\$ORACLE_HOME/bin/rman target sys/<sys_password>@$db auxiliary / <<RMANSCRIPT
+\$ORACLE_HOME/bin/rman target /@$db auxiliary / <<RMANSCRIPT
 $RMAN_INIT
 RUN {	$RMAN_CHANNELS
 

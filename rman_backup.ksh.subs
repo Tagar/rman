@@ -37,44 +37,6 @@ function archive_log_current {
 
 #----------------------------------------------------------------------------
 
-function prepare_channels {
-	if [ $Ver10up -ne 1 ]; then
-		#For 9i databases only (no FRA):
-		mkdir -p $ONDISK_LOCATION/$db
-		eval "CH_FORMAT=\"FORMAT '$BACKUP_FORMAT'\""		#eval() to expand $db and $tags
-	fi
-
-	c=1; while [[ $c -le $1 ]]
-	do
-		RMAN_CHANNELS="$RMAN_CHANNELS
-			ALLOCATE $2 CHANNEL ch$c $ALLOCATE_PARMS $CH_FORMAT;
-			SETLIMIT CHANNEL ch$c $CHANNEL_SETLIMIT;"
-		RMAN_RELEASE_CHANNELS="$RMAN_RELEASE_CHANNELS
-			RELEASE CHANNEL ch$c;"
-		(( c=c+1 ))
-	done
-}
-
-#maintenance channels are used by CHANGE, DELETE and CROSSCHECK commands.
-function prepare_maintenance_channels {
-	#see ML Note 567555.1
-	#  and http://docs.oracle.com/cd/B19306_01/backup.102/b14194/rcmsynta005.htm
-
-	#no release for maintenance channels
-	RMAN_RELEASE_CHANNELS=""
-
-	#maintenance channel type DISK is always allocated:
-	RMAN_CHANNELS="ALLOCATE CHANNEL FOR MAINTENANCE TYPE DISK;"
-
-	if [ $BACKUP_TYPE != 'DISK' ]; then
-		#SBT only if needed:
-		RMAN_CHANNELS="$RMAN_CHANNELS
-			ALLOCATE CHANNEL FOR MAINTENANCE $ALLOCATE_PARMS;"
-	fi
-}
-
-#----------------------------------------------------------------------------
-
 function dosql {
 	typeset -n retvar=$1
 	login=${3:-/as sysdba}
@@ -86,29 +48,6 @@ exit;
 EOF
 		)
 	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
-}
-
-#-------------------------------------------
-
-#This function is used to limit RMAN's ability to hog CPU
-# (especially helpful when used with bzip2 compression - 10g default)
-function renice_rman {
-	sleep $RENICE_WAIT	#wait for all rman channels to start up
-	dosql PIDS "
-		select p.spid  from  v\$session s join v\$process p on (s.paddr = p.addr)
-		where  lower(s.client_info) like 'rman%'
-		   and lower(s.program)     like 'rman@%'  
-		   and lower(s.module)      like 'backup%'
-		   and s.logon_time>sysdate-($RENICE_WAIT+120)/86400"
-	PIDS2=`echo "$PIDS\c" | tr "\n" ","`
-	if [ "x$PIDS2" = "x" ]; then
-		echo "WARN: renice_rman() could not detect active RMAN sessions. RENICE_WAIT is too small?"
-	else
-		echo $PIDS | xargs re$NICE
-		echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
-		echo "List of RMAN related processes with PIDs $PIDS2:"
-		ps -o pid,nice,user,time,comm,args -p $PIDS2
-	fi
 }
 
 #-------------------------------------------
@@ -127,14 +66,6 @@ function get_database_info
 	#-- cut out first word - e.g. "physical" and keep only 'PRIMARY' or 'STANDBY'
 	dosql DB_ROLE "select SUBSTR(r,INSTR(r,' ')+1) from (select database_role r from v\$database)"
 	echo "INFO: Database Role: $DB_ROLE"
-}
-
-#-------------------------------------------
-
-function email {
-	subject=$1
-	mailx -s "$db@`hostname` $subject *****" $DBA_EMAIL
-	echo "INFO: email with subject '$subject' sent to $DBA_EMAIL at `date`"
 }
 
 #-------------------------------------------
@@ -173,6 +104,14 @@ EMAIL
 $FRA_USAGE
 EMAIL
 	fi
+}
+
+#-------------------------------------------
+
+function email {
+	subject=$1
+	mailx -s "$db@`hostname` $subject *****" $DBA_EMAIL
+	echo "INFO: email with subject '$subject' sent to $DBA_EMAIL at `date`"
 }
 
 #-------------------------------------------
@@ -235,9 +174,33 @@ EMAIL
 
 #-------------------------------------------
 
+#This function is used to limit RMAN's ability to hog CPU
+# (especially helpful when used with bzip2 compression - 10g default)
+function renice_rman {
+	sleep $RENICE_WAIT	#wait for all rman channels to start up
+	dosql PIDS "
+		select p.spid  from  v\$session s join v\$process p on (s.paddr = p.addr)
+		where  lower(s.client_info) like 'rman%'
+		   and lower(s.program)     like 'rman@%'  
+		   and lower(s.module)      like 'backup%'
+		   and s.logon_time>sysdate-($RENICE_WAIT+120)/86400"
+	PIDS2=`echo "$PIDS\c" | tr "\n" ","`
+	if [ "x$PIDS2" = "x" ]; then
+		echo "WARN: renice_rman() could not detect active RMAN sessions. RENICE_WAIT is too small?"
+	else
+		echo $PIDS | xargs re$NICE
+		echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
+		echo "List of RMAN related processes with PIDs $PIDS2:"
+		ps -o pid,nice,user,time,comm,args -p $PIDS2
+	fi
+}
+
+#-------------------------------------------
+
 function check_simul_run {
-	rmans=`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$) " | wc -l`
+	rmans=`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$|XCHK) " | wc -l`
 	# $$ - assuming default ps -ef prints both pid and ppid
+	# XCHK - is normally a long-running process that is okay to run with archived log backups
 
 	if [ $rmans -gt 1 ] ; then
                 echo "WARNING: more than 1 active RMAN script is running"
@@ -245,7 +208,7 @@ function check_simul_run {
         Log file $LOGFILE
 	Exiting...
         Other RMAN scripts running: $rmans
-`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$) "`
+`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$|XCHK) "`
 EMAIL
 		exit 1
 	fi
@@ -268,27 +231,6 @@ function parse_params {
 	eval set -A params $(echo $db | tr ':' ' ')
 	db=${params[0]}
 	DG=${params[1]}
-}
-
-#-------------------------------------------
-
-function reset_global_vars {
-	unset DB_ROLE SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
-	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES
-	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
-	unset p c S1 S2 params minutes seconds errcount rman_debug clone_script dt
-	#Global variables not to clean: DG
-	#
-	export PATH=$orig_PATH:$PATHS
-	MODE=$orig_MODE
-	#
-	S1=$SECONDS
-	rman_target="/"
-
-	#Use Oracle's oraenv to set oracle environment variables for current SID
-	ORACLE_SID=$db
-	ORAENV_ASK=NO
-	. oraenv
 }
 
 #-------------------------------------------
@@ -380,4 +322,88 @@ RMANSCRIPT
 
 CLONESCRIPT
 	echo "INFO: RMAN clone script generated as $clone_script"
+}
+
+#----------------------------------------------------------------------------
+
+function prepare_channels {
+	if [ $Ver10up -ne 1 ]; then
+		#For 9i databases only (no FRA):
+		mkdir -p $ONDISK_LOCATION/$db
+		eval "CH_FORMAT=\"FORMAT '$BACKUP_FORMAT'\""		#eval() to expand $db and $tags
+	fi
+
+	c=1; while [[ $c -le $1 ]]
+	do
+		RMAN_CHANNELS="$RMAN_CHANNELS
+			ALLOCATE $2 CHANNEL ch$c $ALLOCATE_PARMS $CH_FORMAT;
+			SETLIMIT CHANNEL ch$c $CHANNEL_SETLIMIT;"
+		RMAN_RELEASE_CHANNELS="$RMAN_RELEASE_CHANNELS
+			RELEASE CHANNEL ch$c;"
+		(( c=c+1 ))
+	done
+}
+
+#maintenance channels are used by CHANGE, DELETE and CROSSCHECK commands.
+function prepare_maintenance_channels {
+	#see ML Note 567555.1
+	#  and http://docs.oracle.com/cd/B19306_01/backup.102/b14194/rcmsynta005.htm
+
+	#no release for maintenance channels
+	RMAN_RELEASE_CHANNELS=""
+
+	#maintenance channel type DISK is always allocated:
+	RMAN_CHANNELS="ALLOCATE CHANNEL FOR MAINTENANCE TYPE DISK;"
+
+	if [ $BACKUP_TYPE != 'DISK' ]; then
+		#SBT only if needed:
+		RMAN_CHANNELS="$RMAN_CHANNELS
+			ALLOCATE CHANNEL FOR MAINTENANCE $ALLOCATE_PARMS;"
+	fi
+}
+
+function rman_pri_configures {
+	#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
+	#This could lead to standby having different retention policy from primary.
+	if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
+		SCRIPT="$RMAN_PRI_CONFIGURES
+				$SCRIPT"
+		if [ "x$DG" = 'xDG' ]; then
+			#APPLIED ON STANDBY works on 10g/11g, but APPLIED ON ALL STANDBY is 11g only.
+			#You should put any other configures into $RMAN_HEADER_SCRIPT, so it'll be applied to standby also.
+			if [ "$Release" -le "10" ] ; then
+				SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON STANDBY;
+						$SCRIPT"
+				#In 10g DG you also want to set following according to DOC Id 728053.1
+				#alter system set "_log_deletion_policy"='ALL' scope=spfile;
+			else
+				SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
+						$SCRIPT"
+			fi
+		else
+			SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY CLEAR;
+						$SCRIPT"
+		fi
+	fi
+}
+
+#-------------------------------------------
+
+function reset_global_vars {
+	unset DB_ROLE SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
+	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES
+	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
+	unset p c S1 S2 params minutes seconds errcount rman_debug clone_script dt
+	#Global variables not to clean: DG
+	#
+	PATH=$orig_PATH:$PATHS
+	MODE=$orig_MODE
+	#
+	S1=$SECONDS
+	rman_target="/"
+
+	#Use Oracle's oraenv to set oracle environment variables for current SID
+	ORACLE_SID=$db
+	ORAENV_ASK=NO
+	. oraenv
 }

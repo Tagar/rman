@@ -1,7 +1,5 @@
 #!/bin/ksh93
 
-#HP-UX: /usr/dt/bin/dtksh is closest ksh93 equivalent
-
 #------------------------------------------------------------------
 # ********* RMAN backups script	 	rman_backup.ksh ***************
 #
@@ -124,20 +122,7 @@ function DO_RMAN_BACKUP {
 	esac
 
 	prepare_channels $p
-
-	if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
-		#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
-		#This could lead to standby having different retention policy from primary.
-		SCRIPT="$RMAN_PRI_CONFIGURES
-				$SCRIPT"
-		if [ "x$DG" = 'xDG' ]; then
-			SCRIPT="$RMAN_PRI_CONFIGURES_DG
-						$SCRIPT"
-		else
-			SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY CLEAR;
-						$SCRIPT"
-		fi
-	fi
+	rman_pri_configures
 
 	SCRIPT="$RMAN_INIT
 RUN {	$RMAN_HEADER_SCRIPT

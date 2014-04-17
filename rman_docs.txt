@@ -13,6 +13,12 @@
 	On RMAN maintenance channels
 * Doc ID 315098.1
 	On FRA warning levels
+* Doc ID 728053.1 for DG and archived logs deletion policy
+	- In 10g use 
+		alter system set "_log_deletion_policy"='ALL' scope=spfile;
+		and CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON STANDBY;
+	- In 11g and up use
+		CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
 
 RMAN in RAC environment
 	http://docs.oracle.com/cd/E11882_01/rac.112/e41960/rman.htm#RACAD321

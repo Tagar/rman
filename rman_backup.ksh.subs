@@ -23,12 +23,12 @@ function archive_log_current {
 			return
 		fi
 		echo "INFO: Current primary database is $pridb. Will issue ALTER SYSTEM ARCHIVE LOG CURRENT there."
-		dblogin="/@$pridb"	#assuming you already saved Oracle Wallet for this currently primary database
+		dblogin="/@$pridb as sysdba"	#assuming you already saved Oracle Wallet for this currently primary database for user SYS
 	else
 		#it's primary, so archive log switch should be done locally.
 		unset dblogin
 	fi
-	dosql noreturn "ALTER SYSTEM ARCHIVE LOG CURRENT" $dblogin
+	dosql noreturn "ALTER SYSTEM ARCHIVE LOG CURRENT" "$dblogin"
 	#TODO: ORA-16014: log xx sequence# xxx not archived, no available destinations
 	#	 	should be ignored (especially for MODE=ARCH - archive log backups)
 	#		This could happen e.g. if there is no space available but we 
@@ -42,12 +42,18 @@ function dosql {
 	login=${3:-/as sysdba}
 	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus $login about to run: $2"
 	retvar=$( $ORACLE_HOME/bin/sqlplus -S "$login" <<EOF
+whenever sqlerror exit 5;
 set echo off head off feed off newpage none pagesize 1000 linesize 200
 $2;
 exit;
 EOF
 		)
-	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
+	if [ $? -eq 5 ] ; then
+		echo "ERROR: RMAN-00000: sqlplus returned error for SQL: $2"
+		retvar=
+	else
+		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
+	fi
 }
 
 #-------------------------------------------
@@ -365,25 +371,28 @@ function prepare_maintenance_channels {
 function rman_pri_configures {
 	#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
 	#This could lead to standby having different retention policy from primary.
-	if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
-		SCRIPT="$RMAN_PRI_CONFIGURES
+	if [ "x$DB_ROLE" != 'xPRIMARY' ]; then
+		return
+	fi
+	SCRIPT="$RMAN_PRI_CONFIGURES
+			$SCRIPT"
+
+	if [ "x$DG" != 'xDG' ]; then
+		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY CLEAR;
+					$SCRIPT"
+		return
+	fi
+
+	#APPLIED ON STANDBY works on 10g/11g, but APPLIED ON ALL STANDBY is 11g only.
+	#You should put any other configures into $RMAN_HEADER_SCRIPT, so it'll be applied to standby also.
+	if [ "$Release" -le "10" ] ; then
+		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON STANDBY;
 				$SCRIPT"
-		if [ "x$DG" = 'xDG' ]; then
-			#APPLIED ON STANDBY works on 10g/11g, but APPLIED ON ALL STANDBY is 11g only.
-			#You should put any other configures into $RMAN_HEADER_SCRIPT, so it'll be applied to standby also.
-			if [ "$Release" -le "10" ] ; then
-				SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON STANDBY;
-						$SCRIPT"
-				#In 10g DG you also want to set following according to DOC Id 728053.1
-				#alter system set "_log_deletion_policy"='ALL' scope=spfile;
-			else
-				SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
-						$SCRIPT"
-			fi
-		else
-			SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY CLEAR;
-						$SCRIPT"
-		fi
+		#In 10g DG you also want to set following according to DOC Id 728053.1
+		#alter system set "_log_deletion_policy"='ALL' scope=spfile;
+	else
+		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
+				$SCRIPT"
 	fi
 }
 

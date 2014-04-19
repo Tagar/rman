@@ -12,7 +12,7 @@
 #-------------------------------------------
 
 function archive_log_current {
-	if [ "x$DG" = "xDG" ]; then
+	if [ "x$DB_ROLE" = "xSTANDBY" ]; then
 		#If we are here, then it is a standby database.
 		#TODO: check. looks like 11.2.0.4+ tries to switchlog on primary automatically!?
 		dosql pridb 'SELECT PRIMARY_DB_UNIQUE_NAME FROM V$DATABASE'
@@ -218,7 +218,6 @@ function check_simul_run {
 EMAIL
 		exit 1
 	fi
-	#TODO: exclude scripts running rman crosscheck (as this may take a while)?
 }
 
 #-------------------------------------------

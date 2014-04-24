@@ -81,7 +81,9 @@ function backup_archive_logs {
 		#  in some sense
 		SCRIPT="$SCRIPT;"
 	else
-		SCRIPT="$SCRIPT DELETE INPUT;"
+		#As 9i databases do not delete anything automatically...
+		SCRIPT="$SCRIPT DELETE INPUT;
+			DELETE OBSOLETE;"
 	fi
 }
 function backup_database {
@@ -161,7 +163,7 @@ LIST EXPIRED BACKUP;
 CROSSCHECK ARCHIVELOG ALL;
 LIST EXPIRED ARCHIVELOG ALL;
 
-#-- Report what's affected by certain NOLOGGING opertations and can't be recovered
+#-- Report what's affected by certain NOLOGGING operations and can't be recovered
 REPORT UNRECOVERABLE;
 
 #-- What's stored more than target retention policy
@@ -282,12 +284,12 @@ do
 			DO_RMAN_BACKUP				# 1. run the RMAN backup script
 
 			generate_clone_script		# 1.1. generate script to clone database
+			report_backup_size			# 1.2. report backup size
 		fi
-
-		report_runtime
 
 		check_FRA $FRA_WARN_THR		# 2. check Flash Recovery Area space *after* backup - warn if 92% or more used
 
+		report_runtime
 		check_and_email_results		# 3. check for RMAN- and ORA- errors in the $LOGFILE
 
 		echo "===== Completed $MODE for $db @ `date`."

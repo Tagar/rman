@@ -50,6 +50,7 @@ EOF
 		)
 	if [ $? -eq 5 ] ; then
 		echo "ERROR: RMAN-00000: sqlplus returned error for SQL: $2"
+		echo "$retvar"
 		retvar=
 	else
 		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
@@ -72,6 +73,42 @@ function get_database_info
 	#-- cut out first word - e.g. "physical" and keep only 'PRIMARY' or 'STANDBY'
 	dosql DB_ROLE "select SUBSTR(r,INSTR(r,' ')+1) from (select database_role r from v\$database)"
 	echo "INFO: Database Role: $DB_ROLE"
+}
+
+function report_backup_size
+{	[ $Ver10up -ne 1 ] && return 0		#V$RMAN_OUTPUT and V$RMAN_STATUS are 10g+
+
+	#1. Get the first backup piece handle. Line format is different in debug and non-debug mode, e.g. respectively:
+	#RMAN-08530: piece handle=igp6dj9m_1_1 tag=ARCH_LOGS comment=API Version 2.0,MMS Version 9.0.0.84
+	#piece handle=dip6a1do_1_1 tag=ARCH_LOGS comment=API Version 2.0,MMS Version 9.0.0.84
+	handle=`egrep "^(RMAN-08530: )?piece handle=" $LOGFILE | head -n 1 | cut -d "=" -f 2 | cut -d " " -f 1`
+	if [ "x$handle" = "x" ] ; then
+		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: report_backup_size: can't find piece handle in the log file."
+		return
+	fi
+
+	#2. Query parent (session/rman) row from $RMAN_STATUS for the total backup size.
+	dosql used_mb "variable handle VARCHAR2(32);
+begin  :handle := '$handle';
+end;
+/
+	WITH q AS (
+        SELECT /*+ rule */
+                 ROUND(SUM(INPUT_BYTES)/1024/1024,1) inp_mb, ROUND(SUM(OUTPUT_BYTES)/1024/1024,1) out_mb
+        FROM V\$RMAN_STATUS 
+        WHERE ROW_TYPE='SESSION' and OPERATION='RMAN'
+        START WITH (RECID, STAMP) =
+              --(SELECT MAX(session_recid),MAX(session_stamp) FROM V\$RMAN_OUTPUT)
+			  (SELECT /*+ rule */ s2.parent_recid, s2.parent_stamp 
+               FROM sys.V_\$BACKUP_PIECE p JOIN V\$RMAN_STATUS s2 ON (p.rman_status_recid=s2.recid AND p.rman_status_stamp=s2.stamp) 
+				WHERE handle=:handle)
+        CONNECT BY PRIOR RECID = PARENT_RECID AND PRIOR STAMP = PARENT_STAMP
+	) SELECT  'Backed up '||inp_mb ||' Mb of data'
+        ||CASE WHEN out_mb>0.1 and inp_mb/out_mb>1.02 THEN ' (output size is '||out_mb||' Mb)' END
+        ||'.' as size_msg 
+	FROM q"
+	#Reported output size is smaller for incremental backups and/or for backups with enabled compression.
+	echo "INFO: $used_mb"
 }
 
 #-------------------------------------------
@@ -141,14 +178,14 @@ function check_and_email_results {
 		email "RMAN errors" <<EMAIL
 	Log file $LOGFILE
 	Errors:
-`egrep "(RMAN|ORA)-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |tail -15`
+`egrep "(RMAN|ORA)-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |tail -n 15`
 
 	RMAN script used:
 	$SCRIPT
 
-First 100 lines from the log file:
+First 200 lines from the log file:
 
-`head -100 $LOGFILE`
+`head -n 200 $LOGFILE`
 
 ....
 EMAIL
@@ -168,12 +205,23 @@ For more details look at log file $LOGFILE on `hostname`.
 EMAIL
 			;;
 		*)	#email for all normal FULL/INCR backups:
-				email "RMAN backup complete" <<EMAIL
-Last $TAIL_LINES lines from log file $LOGFILE:
+				#wc with redirection (<) does not print file name vs argumented filename
+				if [ `wc -l < $LOGFILE` -le 350 ] ; then
+					#If log file is smaller than 350 lines, email it completely:
+					email "RMAN backup complete" <<EMAIL
+Complete contents of the log file $LOGFILE:
+`cat $LOGFILE`
+EMAIL
+				else
+					email "RMAN backup complete" <<EMAIL
+First 200 and last 100 lines from log file $LOGFILE:
+`head -n 200 $LOGFILE`
 
 ....
-`tail -$TAIL_LINES $LOGFILE`
+
+`tail -n 100 $LOGFILE`
 EMAIL
+				fi
 			;;
 	esac
 }
@@ -211,8 +259,8 @@ function check_simul_run {
 	if [ $rmans -gt 1 ] ; then
                 echo "WARNING: more than 1 active RMAN script is running"
                 email "RMAN scripts schedule overlap" <<EMAIL
-        Log file $LOGFILE
-	Exiting...
+        Log file $LOGFILE0
+	ARCH backup - exiting...
         Other RMAN scripts running: $rmans
 `ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$|XCHK) "`
 EMAIL
@@ -399,9 +447,9 @@ function rman_pri_configures {
 
 function reset_global_vars {
 	unset DB_ROLE SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
-	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES
+	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES handle
 	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
-	unset p c S1 S2 params minutes seconds errcount rman_debug clone_script dt
+	unset p c lines S1 S2 params minutes seconds errcount rman_debug clone_script dt
 	#Global variables not to clean: DG
 	#
 	PATH=$orig_PATH:$PATHS

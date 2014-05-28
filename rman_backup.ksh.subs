@@ -238,11 +238,15 @@ function renice_rman {
 		   and lower(s.program)     like 'rman@%'  
 		   and lower(s.module)      like 'backup%'
 		   and s.logon_time>sysdate-($RENICE_WAIT+120)/86400"
-	PIDS2=`echo "$PIDS\c" | tr "\n" ","`
+	case `uname` in
+		Linux) PIDS2=`echo -n "$PIDS" | tr "\n" ","`	;;
+		*)	   PIDS2=`echo "$PIDS\c" | tr "\n" ","`		;;
+	esac
+
 	if [ "x$PIDS2" = "x" ]; then
 		echo "WARN: renice_rman() could not detect active RMAN sessions. RENICE_WAIT is too small?"
 	else
-		echo $PIDS | xargs re$NICE
+		echo $PIDS | xargs $RENICE
 		echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
 		echo "List of RMAN related processes with PIDs $PIDS2:"
 		ps -o pid,nice,user,time,comm,args -p $PIDS2

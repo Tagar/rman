@@ -108,9 +108,6 @@ EOF
 }
 #-------------------------------------------
 function DO_RMAN_BACKUP {
-	renice_rman &
-	renice_pid=$!
-
 	p=$BACKUP_PARALLELISM
 	case $MODE in
 			ARCH)	backup_archive_logs
@@ -133,6 +130,9 @@ $SCRIPT
 $RMAN_TRAIL_SCRIPT $RMAN_RELEASE_CHANNELS
 }
 "
+	renice_rman &
+	renice_pid=$!
+
 	run_the_script
 
 	kill $renice_pid >/dev/null 2>&1
@@ -157,10 +157,10 @@ function DO_BACKUP_CROSSCHECK {
 	SCRIPT="$RMAN_INIT
 $RMAN_CHANNELS
 #-- Run crosschecks and then report backup pieces and archived logs found as missing.
-CROSSCHECK BACKUP;
+CROSSCHECK BACKUP completed after 'SYSDATE-$RECOVERY_WINDOW-5';
 LIST EXPIRED BACKUP;
 
-CROSSCHECK ARCHIVELOG ALL;
+CROSSCHECK ARCHIVELOG ALL completed after 'SYSDATE–$RECOVERY_WINDOW-5';
 LIST EXPIRED ARCHIVELOG ALL;
 
 #-- Report what's affected by certain NOLOGGING operations and can't be recovered
@@ -245,6 +245,7 @@ do
 	{	echo "===== Starting $MODE for $db @ `date`...."
 		reset_global_vars
 		get_database_info
+		check_best_practices
 
 		if [ "x$DG" = 'xDG' ]; then
 			#for DG databases we should connect using TNS (not just target=/), see Doc ID 1604302.1

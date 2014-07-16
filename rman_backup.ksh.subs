@@ -111,6 +111,19 @@ end;
 	echo "INFO: $used_mb"
 }
 
+function check_best_practices {
+	dosql ctlf_record_keep_time "select value from v\$parameter where name='control_file_record_keep_time'"
+	if [ "$ctlf_record_keep_time" -lt $(( $RECOVERY_WINDOW +10 )) ] ; then
+		echo "WARN: CONTROL_FILE_RECORD_KEEP_TIME init parameter is $ctlf_record_keep_time is too low."
+		echo "WARN: Recommended value is $(( $RECOVERY_WINDOW +10 )) based on your recovery window and Oracle Note 829755.1."
+		if [ "$FIX_BEST_PRACTICES" -eq "1" ] ; then
+			dosql noreturn "ALTER SYSTEM SET CONTROL_FILE_RECORD_KEEP_TIME=$(( $RECOVERY_WINDOW +10 )) scope=BOTH"
+			echo "WARN: Fixed!"
+		fi
+	fi
+}
+
+
 #-------------------------------------------
 
 function check_FRA {
@@ -297,9 +310,10 @@ function remove_old_files {
 	find $BASE_PATH/log \(    -mtime +65 -name "rmanbackup*.log" \
 						   -o -mtime +4  -name "rmanbackup*.rman-trace" \
 						 \) -print -exec rm {} \;
-	find $BASE_PATH/scripts \(   -name "rmanclone_*.sh" \
-							  -o -name "*.*-bkpcopy" \
-						 \) -mtime +65 -print -exec rm {} \;
+	find $BASE_PATH/scripts \(   -mtime +65 -name "rmanclone_*.sh" \
+						   -o -mtime +35  -name "controlf-*.ctl-bkpcopy" \
+						   -o -mtime +65  -name "*.*-bkpcopy" \
+						 \) -print -exec rm {} \;
 }
 
 #-------------------------------------------
@@ -451,10 +465,10 @@ function rman_pri_configures {
 
 function reset_global_vars {
 	unset DB_ROLE SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
-	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES handle
+	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES handle ctlf_record_keep_time
 	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
 	unset p c lines S1 S2 params minutes seconds errcount rman_debug clone_script dt
-	#Global variables not to clean: DG
+	#Global variables not to clean (they don't change from a database to database): DG
 	#
 	PATH=$orig_PATH:$PATHS
 	MODE=$orig_MODE

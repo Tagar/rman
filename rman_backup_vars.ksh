@@ -11,7 +11,7 @@ BACKUP_COMPRESS=0					#one of: 0 or 1 (to turn on RMAN backup compression)
 CUMULATIVE=1						#one of: 0 or 1 (to use CUMULATIVE incremental backups)
 BACKUP_PARALLELISM=2				#number of channels / parallelism
 RECOVERY_WINDOW=35					#in days (at least one full business cycle +a few days if space allows)
-DBA_EMAIL="some.one@company.com"	#where to send notifications and errors
+DBA_EMAIL="some.one@company.com"		#where to send notifications and errors
 FIX_BEST_PRACTICES=1				#if 1, then will fix best practices automatically
 BACKUP_DEBUG=0						#one of: 0 or 1 (backup script debug)
 

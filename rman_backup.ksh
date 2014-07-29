@@ -14,7 +14,7 @@
 
 #Process server-specific parameters first from rman_backup.ksh.vars
 #If you need to update any type of the script's behaviour - look there first.
-. ${0}.vars
+. rman_backup_vars.ksh
 
 
 #------------------------------------------------------------------
@@ -49,7 +49,7 @@ fi
 # ******** Functions:								***************
 
 #Load low-level and utility functions rman_backup.ksh.subs:
-. ${0}.subs
+. rman_backup_subs.ksh
 
 
 #------------------------------------------------------------------

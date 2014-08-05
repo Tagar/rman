@@ -21,9 +21,6 @@ BACKUP_DEBUG=0						#one of: 0 or 1 (backup script debug)
 ONDISK_LOCATION="/u03/backup"		#if BACKUP_TYPE="DISK" then this is used as a backup location
 									#  (only if FRA isn't available; ignored for FRA-enabled databases)
 
-#logs will be in $BASE_PATH/log, generated script in $BASE_PATH/scripts
-BASE_PATH=$( cd "$( dirname "$0" )" && pwd )
-
 RETENTION="CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF $RECOVERY_WINDOW DAYS"
 
 if [ $USE_CATALOG = 1 ]; then

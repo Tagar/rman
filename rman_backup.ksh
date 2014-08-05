@@ -12,9 +12,12 @@
 # 			- RMAN catalog and non-cataloged backups are supported.
 #
 
+#logs will be in $BASE_PATH/log, generated script in $BASE_PATH/scripts
+BASE_PATH=$( cd "$( dirname "$0" )" && pwd )
+
 #Process server-specific parameters first from rman_backup.ksh.vars
 #If you need to update any type of the script's behaviour - look there first.
-. rman_backup_vars.ksh
+. $BASE_PATH/rman_backup_vars.ksh
 
 
 #------------------------------------------------------------------
@@ -49,7 +52,7 @@ fi
 # ******** Functions:								***************
 
 #Load low-level and utility functions rman_backup.ksh.subs:
-. rman_backup_subs.ksh
+. $BASE_PATH/rman_backup_subs.ksh
 
 
 #------------------------------------------------------------------

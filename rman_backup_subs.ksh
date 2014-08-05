@@ -88,7 +88,7 @@ function report_backup_size
 	fi
 
 	#2. Query parent (session/rman) row from $RMAN_STATUS for the total backup size.
-	dosql used_mb "variable handle VARCHAR2(32);
+	dosql used_mb "variable handle VARCHAR2(120);
 begin  :handle := '$handle';
 end;
 /
@@ -114,7 +114,7 @@ end;
 function check_best_practices {
 	dosql ctlf_record_keep_time "select value from v\$parameter where name='control_file_record_keep_time'"
 	if [ "$ctlf_record_keep_time" -lt $(( $RECOVERY_WINDOW +10 )) ] ; then
-		echo "WARN: CONTROL_FILE_RECORD_KEEP_TIME init parameter is $ctlf_record_keep_time is too low."
+		echo "WARN: CONTROL_FILE_RECORD_KEEP_TIME init parameter is $ctlf_record_keep_time. It is too low."
 		echo "WARN: Recommended value is $(( $RECOVERY_WINDOW +10 )) based on your recovery window and Oracle Note 829755.1."
 		if [ "$FIX_BEST_PRACTICES" -eq "1" ] ; then
 			dosql noreturn "ALTER SYSTEM SET CONTROL_FILE_RECORD_KEEP_TIME=$(( $RECOVERY_WINDOW +10 )) scope=BOTH"

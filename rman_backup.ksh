@@ -7,7 +7,7 @@
 # and other documentation.
 #
 # Supported - Oracle releases: tested on 9i, 10g and 11g databases;
-#     		- platforms: Linux, AIX 5.1+, HP-UX 11.11+;
+#     		- platforms: Linux, AIX 5.1+, (HP-UX 11.11 - support discontinued)
 # 			- backup destinations: On disk backups, Commvault, TSM;
 # 			- RMAN catalog and non-cataloged backups are supported.
 #
@@ -215,22 +215,26 @@ function script_mode_XCHK {
 # Start of Main part of the script
 #------------------------------------------------------------------
 cd $BASE_PATH; orig_PATH=$PATH
-mkdir -p $BASE_PATH/log $BASE_PATH/scripts		#where we put all the log files and gererated restore scripts.
+#Where we put all the log files, gererated restore scripts and lock files:
+mkdir -p $BASE_PATH/log $BASE_PATH/scripts $BASE_PATH/lock
 
 LOGFILE0=$BASE_PATH/log/rmanbackup_`date '+%Y%m'`.log
 {	echo "===== Starting $* @ `date` pid=$$...."	
 
 	case $1 in
-		FULL|INCR|DB|ARCH|XCHK)	eval "script_mode_$1";;
-		*)					usage;;
+		FULL|INCR|DB)		simul_run_check="DB"
+							eval "script_mode_$1"
+							;;
+		ARCH|XCHK)			simul_run_check=$1
+							eval "script_mode_$1"
+							;;
+		*)					usage	;;
 	esac
 	orig_MODE=$MODE
 
-	if [ "x$MODE" = "xARCH" ]; then
-		#We don't want to have too many rman processes accumulating.
-		#E.g. sometimes when Commvault has an issue, rman hangs and processes accumulate.
-		check_simul_run			#Check that there are no other rmans that are also running.
-	fi
+	#Don't allow to run more than one RMAN shell script of the same function (DB, ARCH or XCHK).
+	lock_it
+	trap release_lock INT TERM EXIT
 
 	shift; allsids=$*
 } 2>&1 >> $LOGFILE0
@@ -247,6 +251,7 @@ do
 	#-----------------------------------------------
 	{	echo "===== Starting $MODE for $db @ `date`...."
 		reset_global_vars
+
 		get_database_info
 		check_best_practices
 
@@ -302,8 +307,10 @@ do
 # End of $allsids Loop 
 done
 
-{	echo "===== Finished @ `date` pid=$$...."	
+{	release_lock
 	remove_old_files
+
+	echo "===== Finished @ `date` pid=$$...."	
 } 2>&1 >> $LOGFILE0
 
 

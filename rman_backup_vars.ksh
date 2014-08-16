@@ -9,17 +9,19 @@ BACKUP_TYPE="Commvault"					#one of: DISK, Commvault or TSM
 USE_CATALOG=1						#one of: 0 or 1 (if you use RMAN Catalog)
 BACKUP_COMPRESS=0					#one of: 0 or 1 (to turn on RMAN backup compression)
 CUMULATIVE=1						#one of: 0 or 1 (to use CUMULATIVE incremental backups)
-BACKUP_PARALLELISM=2				#number of channels / parallelism
-RECOVERY_WINDOW=35					#in days (at least one full business cycle +a few days if space allows)
+RECOVERY_WINDOW=35					#in days (at least one full business cycle + several days)
 DBA_EMAIL="some.one@company.com"		#where to send notifications and errors
 FIX_BEST_PRACTICES=1				#if 1, then will fix best practices automatically
-BACKUP_DEBUG=0						#one of: 0 or 1 (backup script debug)
+BACKUP_PARALLELISM=2			#number of channels / parallelism
+
+BACKUP_DEBUG=1						#one of: 0 or 1 (backup script debug)
 
 #------------------------------------------------------------------
 
 #ONDISK_LOCATION is for 9i databases only:
 ONDISK_LOCATION="/u03/backup"		#if BACKUP_TYPE="DISK" then this is used as a backup location
 									#  (only if FRA isn't available; ignored for FRA-enabled databases)
+
 
 RETENTION="CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF $RECOVERY_WINDOW DAYS"
 
@@ -28,6 +30,22 @@ if [ $USE_CATALOG = 1 ]; then
 else
 		cataloguid=""					#RMAN catalog is not used.
 fi
+
+#set some global platform-dependent variables
+case `uname` in
+	Linux)	HOSTNAME=`hostname -s`
+			CVLIB='/opt/simpana/Base/libobk.so'
+			STIME='start'
+			;;
+	AIX)	HOSTNAME=`hostname -s`
+			CVLIB='/opt/simpana/Base64/libobk.a(shr.o)'
+			STIME='start'
+			;;
+	HP-UX)	HOSTNAME=`hostname`
+			CVLIB='/opt/simpana/Base64/libobk.sl'
+			STIME='stime'
+			;;
+esac
 
 SBT="DEVICE TYPE 'SBT_TAPE'"
 
@@ -44,14 +62,9 @@ case $BACKUP_TYPE in
 				#   - or issue CONFIGURE RETENTION POLICY TO NONE as described in http://goo.gl/9dplVt
 		RETENTION="CONFIGURE RETENTION POLICY TO NONE"
 
-		CVLIB="SBT_LIBRARY=/opt/simpana/Base64/libobk"
-		CVBLK="BLKSIZE=262144"
 		CVINST="CvInstanceName=Instance001"
-		case `uname` in
-			Linux)	ALLOCATE_PARMS="$SBT PARMS=\"SBT_LIBRARY=/opt/simpana/Base/libobk.so,$CVBLK,ENV=(CvClientName=`hostname -s`,$CVINST)\"";;
-			AIX)	ALLOCATE_PARMS="$SBT PARMS=\"$CVLIB.a(shr.o),$CVBLK,ENV=(CvClientName=`hostname -s`,$CVINST)\"";;
-			HP-UX)	ALLOCATE_PARMS="$SBT PARMS=\"$CVLIB.sl,$CVBLK,ENV=(CvClientName=`hostname`,$CVINST)\"";;
-		esac
+		ALLOCATE_PARMS="$SBT PARMS=\"SBT_LIBRARY=$CVLIB,BLKSIZE=262144,ENV=(CvClientName=$HOSTNAME,$CVINST)\""
+
 		BACKUP_COMPRESS=0		#disable rman compression for Commvault as deduplication is more efficient
 		;;
 	TSM)	#3. Tivoli Storage Manager. This vendor was *not* yet tested enough, 
@@ -92,7 +105,9 @@ CHANNEL_SETLIMIT="MAXOPENFILES 8"		#SETLIMIT CHANNEL .. - will be used for each 
 RMAN_INIT="		SHOW ALL;
 		SET ECHO ON;"
 #BACKUP OPTIMIZATION ON is important e.g. to skip archived logs that were already backed up:
-RMAN_HEADER_SCRIPT="CONFIGURE BACKUP OPTIMIZATION ON;"
+#CONFIGURE CONTROLFILE AUTOBACKUP OFF because we explicitly backup control and spfiles after each backup
+RMAN_HEADER_SCRIPT="CONFIGURE BACKUP OPTIMIZATION ON;
+CONFIGURE CONTROLFILE AUTOBACKUP OFF;"
 RMAN_TRAIL_SCRIPT=""
 
 #OERR: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY (Doc ID 291469.1)
@@ -104,9 +119,6 @@ RMAN_PRI_CONFIGURES="$RETENTION;"
 #------------------------------------------------------------------
 FULL_BKP_DAY=6					#"DB"-backup scheduled mode: day of FULL backup (e.g. 6=Sat, 0=Sun)
 FRA_WARN_THR=88					#FRA warning level, %; don't make it lower than 85% - see Doc ID 315098.1
-NICE=5							#How much to lower rman processes priority 
-RENICE_WAIT=70					#How many seconds to wait for rman channels to start, before renice.
-								#	- So all channels will have time to fully startup.
 
 
 BACKUP_FORMAT='$ONDISK_LOCATION/$db/rman_${tags}_%t_s%s_p%p.bkp'	#Will be used for BACKUP_TYPE=DISK *AND* pre-10g databases *only* (9i doesn't have FRA functionality)
@@ -128,13 +140,12 @@ if [ $USE_CATALOG = 1 ]; then
 		$RMAN_INIT"
 fi
 
-#platform-specific renice/nice commands:
-case `uname` in
+NICE=5							#How much to lower rman processes priority.
+case `uname` in					#platform-specific renice/nice commands:
 	Linux)	RENICE="renice +$NICE"	;;	#in Linux renice sets nice priority to absolute value,
-	*)		RENICE="renice -n $NICE"	;;		#while in UNIX it is relative change (lower priority)
+	*)		RENICE="renice -n $NICE"	;;		#while in UNIX it is relative change (lowers priority)
 esac
 NICE="nice -n $NICE"
-
 
 #------------------------------------------------------------------
 #	Some environment variables:

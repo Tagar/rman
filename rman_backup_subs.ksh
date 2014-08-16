@@ -42,16 +42,21 @@ function dosql {
 	login=${3:-/as sysdba}
 	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus $login about to run: $2"
 	retvar=$( $ORACLE_HOME/bin/sqlplus -S "$login" <<EOF
-whenever sqlerror exit 5;
+WHENEVER OSERROR EXIT 5;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
 set echo off head off feed off newpage none pagesize 1000 linesize 200
 $2;
 exit;
 EOF
 		)
-	if [ $? -eq 5 ] ; then
-		echo "ERROR: RMAN-00000: sqlplus returned error for SQL: $2"
-		echo "$retvar"
-		retvar=
+	#adding RMAN-00000 in case of errors so it will be catched by check_and_email_results() in case of errors
+	sqlplus_retcode=$?
+	if [ $sqlplus_retcode -eq 5 ] ; then
+		echo "ERROR: RMAN-00000: An OS error happened while running sqlplus script: $retvar"
+		unset retvar
+	elif [ $sqlplus_retcode -ne 0 ] ; then
+		echo "ERROR: RMAN-00000: An SQL error happened while running sqlplus script: $retvar"
+		unset retvar
 	else
 		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
 	fi
@@ -71,8 +76,32 @@ function get_database_info
 
 	#2. get database DG role
 	#-- cut out first word - e.g. "physical" and keep only 'PRIMARY' or 'STANDBY'
-	dosql DB_ROLE "select SUBSTR(r,INSTR(r,' ')+1) from (select database_role r from v\$database)"
+	dosql DB_ROLE "SELECT SUBSTR(R,INSTR(R,' ')+1) FROM (SELECT DATABASE_ROLE R FROM V\$DATABASE)"
 	echo "INFO: Database Role: $DB_ROLE"
+
+	#3. check if this database is a RAC cluster
+	dosql RAC "SELECT CASE WHEN COUNT(*)<=1 THEN 'Single Instance' ELSE 'RAC' END FROM GV\$INSTANCE"
+	echo "INFO: Database Type: $RAC"
+
+	#4. Show spfile and control files parameters
+	dosql sp_ctlf "SELECT RPAD(UPPER(NAME),rownum*8)||': '||DISPLAY_VALUE FROM V\$PARAMETER WHERE NAME IN ('spfile','control_files') ORDER BY NAME DESC"
+	echo "INFO: $sp_ctlf"
+
+	if [ $Ver10up -eq 1 ]; then
+		#5. Show if BCT is enabled
+		#TODO: Check V$BACKUP_DATAFILE.USED_CHANGE_TRACKING if it was actually used for an incremental backup
+		dosql BCT 'SELECT STATUS FROM V$BLOCK_CHANGE_TRACKING'
+		echo "INFO: Block Change Tracking: $BCT"
+
+		#6. Check if Flashback Database is enabled
+		dosql FLASHBACK "SELECT DECODE(FLASHBACK_ON, 'YES','ENABLED', 'DISABLED') FROM V\$DATABASE"
+		if [ $FLASHBACK = 'ENABLED' ]; then
+			dosql FLASH_RET "SELECT trunc(value/60)||' hours and '||mod(value,60)||' minutes' FROM V\$PARAMETER WHERE NAME='db_flashback_retention_target'"
+			echo "INFO: Database Flashback: $FLASHBACK, retention target is $FLASH_RET"
+		else
+			echo "INFO: Database Flashback: $FLASHBACK"
+		fi
+	fi
 }
 
 function report_backup_size
@@ -103,8 +132,8 @@ end;
                FROM sys.V_\$BACKUP_PIECE p JOIN V\$RMAN_STATUS s2 ON (p.rman_status_recid=s2.recid AND p.rman_status_stamp=s2.stamp) 
 				WHERE handle=:handle)
         CONNECT BY PRIOR RECID = PARENT_RECID AND PRIOR STAMP = PARENT_STAMP
-	) SELECT  'Backed up '||inp_mb ||' Mb of data'
-        ||CASE WHEN out_mb>0.1 and inp_mb/out_mb>1.02 THEN ' (output size is '||out_mb||' Mb)' END
+	) SELECT  'Backed up '|| TRIM(TO_CHAR(inp_mb,'99,999,999.9')) ||' Mb of data'
+        ||CASE WHEN out_mb>0.1 and inp_mb/out_mb>1.02 THEN ' (output size is '||TRIM(TO_CHAR(out_mb,'99,999,999.9'))||' Mb)' END
         ||'.' as size_msg 
 	FROM q"
 	#Reported output size is smaller for incremental backups and/or for backups with enabled compression.
@@ -151,7 +180,7 @@ EMAIL
 	echo "INFO: FLASH RECOVERY AREA is ${FRA_PRC_USED_HARD}% FULL (minus reclaimable space)"
 	if [ $FRA_PRC_USED_HARD -ge $FRA_THRESHOLD ] ; then
 		dosql FRA_USAGE 'set head on echo on
-                SELECT * FROM V$FLASH_RECOVERY_AREA_USAGE'
+                SELECT * FROM V$FLASH_RECOVERY_AREA_USAGE WHERE PERCENT_SPACE_USED>0'
 		email "flash_recovery_area is ${FRA_PRC_USED_HARD}% FULL" <<EMAIL
 		This is a WARNING.
 		FLASH RECOVERY AREA of $db@`hostname` database is ${FRA_PRC_USED_HARD}% FULL.
@@ -166,7 +195,7 @@ EMAIL
 
 function email {
 	subject=$1
-	mailx -s "$db@`hostname` $subject *****" $DBA_EMAIL
+	mailx -s "$db@$HOSTNAME $subject *****" $DBA_EMAIL
 	echo "INFO: email with subject '$subject' sent to $DBA_EMAIL at `date`"
 }
 
@@ -241,47 +270,165 @@ EMAIL
 
 #-------------------------------------------
 
+RENICE_SLEEP=25					#How many seconds to wait before attempt to renice 
+RENICE_WAITS=10					#How many attempts to wait for rman channels to start, before renice.
+								#	- So all channels will have time to fully startup.
+
 #This function is used to limit RMAN's ability to hog CPU
 # (especially helpful when used with bzip2 compression - 10g default)
 function renice_rman {
-	sleep $RENICE_WAIT	#wait for all rman channels to start up
-	dosql PIDS "
-		select p.spid  from  v\$session s join v\$process p on (s.paddr = p.addr)
-		where  lower(s.client_info) like 'rman%'
-		   and lower(s.program)     like 'rman@%'  
-		   and lower(s.module)      like 'backup%'
-		   and s.logon_time>sysdate-($RENICE_WAIT+120)/86400"
-	case `uname` in
-		Linux) PIDS2=`echo -n "$PIDS" | tr "\n" ","`	;;
-		*)	   PIDS2=`echo "$PIDS\c" | tr "\n" ","`		;;
-	esac
-
-	if [ "x$PIDS2" = "x" ]; then
-		echo "WARN: renice_rman() could not detect active RMAN sessions. RENICE_WAIT is too small?"
-	else
-		echo $PIDS | xargs $RENICE
-		echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
-		echo "List of RMAN related processes with PIDs $PIDS2:"
-		ps -o pid,nice,user,time,comm,args -p $PIDS2
+	#TODO: renice also RMAN channels running in parallel on another RAC nodes 
+	#      (using RAC nodes' password-less ssh setup)
+	c=1; while [[ $c -le $RENICE_WAITS ]]
+	do
+		sleep $RENICE_SLEEP		#wait for all rman channels to start up
+		dosql PIDS "
+			SELECT p.spid  FROM  v\$session s join v\$process p on (s.paddr = p.addr)
+			WHERE  lower(s.client_info) like 'rman%'
+			   AND lower(s.program)     like 'rman@%'
+			   AND lower(s.module)      like 'backup%'
+			   AND s.logon_time > SYSDATE-$RENICE_SLEEP*$RENICE_WAITS/86400"
+		PIDS2=`echo "$PIDS" | tr "\n" "," | sed 's/,*$//'`
+		if [ "x$PIDS2" = "x" ]; then
+			[ $BACKUP_DEBUG -eq 1 ] && echo "renice_rman(): renice_attempts=$c, no RMAN channels found"
+		else
+			#found processes to renice
+			echo $PIDS | xargs $RENICE
+			echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
+			echo "List of RMAN related processes with PIDs $PIDS2:"
+			ps -o pid,nice,user,time,comm,args -p $PIDS2
+			return
+		fi
+		(( c=c+1 ))
+	done
+	if [[ $c -gt $RENICE_WAITS ]]; then
+		echo "WARN: renice_rman() could not detect active RMAN sessions. Waited too small?"
 	fi
+	#NOTE: On some platforms if RMAN creates LOCAL=YES connection, oracle dedicated processes will
+	#	   inherit nice property from RMAN processes that is already has priority reniced down.
 }
 
 #-------------------------------------------
 
-function check_simul_run {
-	rmans=`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$|XCHK) " | wc -l`
-	# $$ - assuming default ps -ef prints both pid and ppid
-	# XCHK - is normally a long-running process that is okay to run with archived log backups
+function release_lock {
+	#This function removes lock files and is called directly, or as
+	#a signal handler for INT, TERM and EXIT signals
+	if [ "x$lock_fname" = "x"  -o  "x$lock_uuid" = "x" ]; then
+		#No lock file was created by this process
+		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: release_lock(): No lock was set."
+		#this might be okay if release_lock() 1st called explicitly, and then from exit trap.
+		return
+	fi
 
-	if [ $rmans -gt 1 ] ; then
-                echo "WARNING: more than 1 active RMAN script is running"
-                email "RMAN scripts schedule overlap" <<EMAIL
-        Log file $LOGFILE0
-	ARCH backup - exiting...
-        Other RMAN scripts running: $rmans
-`ps -ef | grep "rman/rman_backup.ksh" | egrep -v " (grep|$$|XCHK) "`
+	if [ -e $lock_fname ]; then
+		#1. confirm lock file was created by our process
+		if [ "x`cat $lock_fname`" != "x$lock_uuid" ]; then
+			[ $BACKUP_DEBUG -eq 1 ] && echo "WARN: '`cat $lock_fname`' != '$lock_uuid'."
+			echo "WARN: release_lock(): lock $lock_fname is from a different process. Exiting."
+			return
+		fi
+		#2. remove lock file
+		rm $lock_fname
+	else
+		echo "WARN: release_lock(): Lock $lock_fname doesn't exist."
+	fi
+
+	#3. finally, remove symlink to the lock file
+	rm $lock_fname.lock 2>/dev/null
+	echo "INFO: Released lock $lock_fname.lock by pid $$ on $HOSTNAME."
+	unset lock_fname lock_uuid
+}
+
+function proc_uuid {
+	host=$1;pid=$2
+	ps_cmd="ps -p $pid -o ppid,user,ruser,rgid,tty,args"
+	if [ "x$host" = "x$HOSTNAME" ]; then
+		uuid=`$ps_cmd |tail -1`
+	else
+		#backup process can be on a different host (e.g. a RAC database)
+		uuid=`ssh -o PasswordAuthentication=no -o StrictHostKeyChecking=no $host "$ps_cmd |tail -1"`
+	fi
+	if [ $? -ne 0 ] ; then
+		if [ "x$host" = "x$HOSTNAME" ]; then
+			echo "WARN: proc_uuid: Process $pid doesn't exist locally on $host." >&2
+		else
+			echo "WARN: proc_uuid: Couldn't check locking process on remote host $host or process $pid doesn't exist there." >&2
+		fi
+		echo "WARN: Process $pid doesn't exist on $host"
+		return 1
+	else
+		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: proc_uuid: Completed ps for process $pid on $host." >&2
+	fi
+	echo $host $pid $uuid		#don't double quote: $IFS will remove extra spaces in $uuid
+	return 0
+}
+
+function validate_lock {
+	if [ ! -e $lock_fname ]; then
+		echo "WARN: $lock_fname.lock symlink exists, but not the actual lock file. Ignoring."
+		#we will just reuse symlink that already exists
+		return
+	fi
+
+	#The $lock_fname lock file exists too - read hostname and pid from it
+	eval set -A lock_data $(cat $lock_fname)
+	pid=${lock_data[1]};host=${lock_data[0]}
+	echo "INFO: validate_lock: lock file found: checking for process $pid on $host"
+
+	#validity check 1 - try to ps that process (it will fail if it doesn't exist)
+	remote_lock_uuid=$(proc_uuid $host $pid)
+	if [ $? -ne 0 ]; then
+		#Couldn't check if process exists. proc_uuid() also already showed WARN message
+		echo "WARN: validate_lock(): Couldn't check $pid on $host. $lock_fname is stale. Overwriting."
+		return
+	fi
+
+	#validity check 2 - compare proc_uuid() for a hostname and pid from the lock file
+	#	and compare with it is actually is in the lock file.
+	#They will be different if now another process is running under the *same pid*.
+	if [ "x`cat $lock_fname`" != "x$remote_lock_uuid" ]; then
+		[ $BACKUP_DEBUG -eq 1 ] && echo "WARN: '`cat $lock_fname`' != '$remote_lock_uuid'."
+		echo "WARN: validate_lock(): $pid on $host is not a process that created the lock. $lock_fname is stale. Overwriting."
+		return
+	fi
+
+	#If we are here - lock file is valid. Exit nicely
+	echo "WARN: Lock $lock_fname.lock exists; Other RMAN process is still running. Exiting"
+	email "RMAN scripts schedule overlap" <<EMAIL
+	See log file $LOGFILE0 for more details:
+	Warning. Lock $lock_fname exists!
+$simul_run_check RMAN function is already running. Exiting...
+	Other RMAN script running (host, pid, ppid, user, ruser, rgid, tty, args):
+$remote_lock_uuid
+	Process is confirmed as still running.
 EMAIL
-		exit 1
+	unset lock_fname lock_uuid
+	exit 1
+}
+
+function lock_it {
+	lock_fname="$BASE_PATH/lock/rmanbackup.$simul_run_check"
+	#Prepare identification string that is being written to the lock file.
+	lock_uuid=$(proc_uuid $HOSTNAME $$)
+	[ $? -ne 0 ] && exit 1		#ps -p $$  should always succeed
+
+	#1. Create a symlink. Note: $lock_fname may not exist yet
+	#   Using symlinks because this is an atomic check. Works on NFS too.
+	ln -s $lock_fname $lock_fname.lock
+	if [ $? -ne 0 ] ; then
+		#Symlink exists, validate if lock file is not stale
+		validate_lock
+		rm -f $lock_fname
+	fi
+
+	#2. Write uuid to the lock file, and make sure release_lock is called even if script exits
+	trap release_lock INT TERM		#don't add trap EXIT in a ksh function
+	echo $lock_uuid > $lock_fname
+	if [ $? -eq 0 ] ; then
+		echo "INFO: Acquired lock $lock_fname.lock by pid $$ on $HOSTNAME"
+	else
+		echo "WARN: Error writing to $lock_fname. Ignoring."
+		#it is important to run a backup - so just ignoring lock file problem
 	fi
 }
 
@@ -454,7 +601,8 @@ function rman_pri_configures {
 		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON STANDBY;
 				$SCRIPT"
 		#In 10g DG you also want to set following according to DOC Id 728053.1
-		#alter system set "_log_deletion_policy"='ALL' scope=spfile;
+		#ALTER SYSTEM SET "_LOG_DELETION_POLICY"='ALL' SCOPE=SPFILE;
+		#TODO: add to check_best_practices() function?
 	else
 		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
 				$SCRIPT"
@@ -464,10 +612,12 @@ function rman_pri_configures {
 #-------------------------------------------
 
 function reset_global_vars {
-	unset DB_ROLE SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
+	unset DB_ROLE RAC sp_ctlf SCRIPT RMAN_CHANNELS RMAN_RELEASE_CHANNELS PIDS CH_FORMAT
 	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES handle ctlf_record_keep_time
 	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
 	unset p c lines S1 S2 params minutes seconds errcount rman_debug clone_script dt
+	unset sqlplus_retcode BCT FLASHBACK FLASH_RET
+	unset host pid ps_cmd uuid lock_data remote_lock_uuid
 	#Global variables not to clean (they don't change from a database to database): DG
 	#
 	PATH=$orig_PATH:$PATHS

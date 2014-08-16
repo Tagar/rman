@@ -47,16 +47,17 @@ FAQ
  3. If using custom archive_log_format, always include %s,%t and %r (read http://goo.gl/7RUPTQ for details).
  4. Always use spfiles, so init parameters can be backed up automatically.
  5. $BASE_PATH should be in a separate filesystem from all of your Oracle Homes.
+ 6. Oracle 10g Data Guard should have _LOG_DELETION_POLICY='ALL' per 728053.1 Note. 11g+ does this automatically.
 BESTPRACTICES
 
 # *** Complete Oracle Wallet setup steps **************************
 <<ORACLEWALLET
 #------------------------------------------------------------------
 1. Adjust sqlnet.ora in $TNS_ADMIN/sqlnet.ora (you should use separate OW for each OH):
-	$ cat >> $TNS_ADMIN/sqlnet.ora <<EOHD
+	$ cat >> ${TNS_ADMIN:-${ORACLE_HOME}/network/admin}/sqlnet.ora <<EOHD
 #== Oracle Wallet Configuratiob below == do no remove this and following lines
 WALLET_LOCATION =
-   (SOURCE=(METHOD=FILE)(METHOD_DATA=(DIRECTORY=$TNS_ADMIN)))
+   (SOURCE=(METHOD=FILE)(METHOD_DATA=(DIRECTORY=${TNS_ADMIN:-${ORACLE_HOME}/network/admin})))
 SQLNET.WALLET_OVERRIDE = TRUE
 SSL_CLIENT_AUTHENTICATION = FALSE
 SSL_VERSION = 0
@@ -64,17 +65,17 @@ SSL_VERSION = 0
 EOHD
 
 2. Create the Wallet:
-	$ mkstore -create -wrl $TNS_ADMIN
+	$ mkstore -create -wrl ${TNS_ADMIN:-${ORACLE_HOME}/network/admin}
 	It will ask for a new Oracle Wallet password twice - make sure you'll keep it in a secure place.
 
 3. Add as many TNS entries into Oracle Wallet as needed.
 3.1. RMAN Catalog password (if you're using catalog), e.g. 
-	$ mkstore -wrl $TNS_ADMIN -createCredential rmanc rman11 Password
+	$ mkstore -wrl ${TNS_ADMIN:-${ORACLE_HOME}/network/admin} -createCredential rmanc rman11 Password
 		where rmanc - TNS name that will be used by this script and referred in cataloguid variable above,
 			  rman11 - rman catalog user, and Password - is password of this user.
 3.2. If using Data Guard - add also following two entries
-	$ mkstore -wrl $TNS_ADMIN -createCredential TnsThisNode sys SysPassword
-	$ mkstore -wrl $TNS_ADMIN -createCredential TnsOtherNode sys SysPassword
+	$ mkstore -wrl ${TNS_ADMIN:-${ORACLE_HOME}/network/admin} -createCredential TnsThisNode sys SysPassword
+	$ mkstore -wrl ${TNS_ADMIN:-${ORACLE_HOME}/network/admin} -createCredential TnsOtherNode sys SysPassword
 		where TnsOtherNode - TNS name (from tnsnames.ora) that will be to connect to the other node
 				in DG setup to do ARCHIVE LOG CURRENT there,
 			make sure to use user SYS and not SYSTEM for TnsThisNode.
@@ -89,7 +90,7 @@ EOHD
 	$ scp ?wallet.* anothernode:`pwd`
 5.2. If you see this as a security risk, then Oracle Wallet can be created without ability 
    to be used on other servers. Use orapki command then instead of mkstore:
-	$ orapki wallet create -wallet $TNS_ADMIN -pwd "walletpwd" -auto_login_local
+	$ orapki wallet create -wallet ${TNS_ADMIN:-${ORACLE_HOME}/network/admin} -pwd "walletpwd" -auto_login_local
 
 For more information regarding Oracle Wallet read http://docs.oracle.com/cd/E11882_01/network.112/e16543/authentication.htm#DBSEG30253
 ORACLEWALLET

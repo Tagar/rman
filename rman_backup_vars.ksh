@@ -1,6 +1,6 @@
 
 #------------------------------------------------------------------
-# ********* RMAN backups script variables  rman_backup.ksh.vars ***
+# ********* RMAN backups script variables  rman_backup_vars.ksh ***
 #
 #	This file stores all site/server-specific variables.
 #
@@ -14,7 +14,7 @@ DBA_EMAIL="some.one@company.com"		#where to send notifications and errors
 FIX_BEST_PRACTICES=1				#if 1, then will fix best practices automatically
 BACKUP_PARALLELISM=2			#number of channels / parallelism
 
-BACKUP_DEBUG=1						#one of: 0 or 1 (backup script debug)
+BACKUP_DEBUG=0						#one of: 0 or 1 (backup script debug)
 
 #------------------------------------------------------------------
 
@@ -32,18 +32,16 @@ else
 fi
 
 #set some global platform-dependent variables
+ORATAB="/etc/oratab"
 case `uname` in
 	Linux)	HOSTNAME=`hostname -s`
-			CVLIB='/opt/simpana/Base/libobk.so'
-			STIME='start'
+			CVLIB='/opt/simpana/Base/libobk.so'			#Commvault library location
 			;;
 	AIX)	HOSTNAME=`hostname -s`
 			CVLIB='/opt/simpana/Base64/libobk.a(shr.o)'
-			STIME='start'
 			;;
 	HP-UX)	HOSTNAME=`hostname`
 			CVLIB='/opt/simpana/Base64/libobk.sl'
-			STIME='stime'
 			;;
 esac
 

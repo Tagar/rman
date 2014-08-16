@@ -1,68 +1,15 @@
 
 #----------------------------------------------------------------------------
-# ********* RMAN backups script	low-level subroutines rman_backup.ksh.subs **
+# ********* RMAN backups script	low-level subroutines rman_backup_subs.ksh **
 #
-# This subscript includes low-level functions used by rman_backup.ksh
+# This subscript includes functions used by the main script rman_backup.ksh
 #
 #
 
-# ******** Functions:								***************
 
-
-#-------------------------------------------
-
-function archive_log_current {
-	if [ "x$DB_ROLE" = "xSTANDBY" ]; then
-		#If we are here, then it is a standby database.
-		#TODO: check. looks like 11.2.0.4+ tries to switchlog on primary automatically!?
-		dosql pridb 'SELECT PRIMARY_DB_UNIQUE_NAME FROM V$DATABASE'
-		if [ "x$pridb" = "x" ]; then
-			echo "WARN: There is no value in v$database.PRIMARY_DB_UNIQUE_NAME for $db database."
-			echo "Did this database ever received redo from primary database? Read http://goo.gl/CiV9Tl for PRIMARY_DB_UNIQUE_NAME"
-			echo "Continuing backup, but *** THIS HAS TO BE FIXED ***"
-			return
-		fi
-		echo "INFO: Current primary database is $pridb. Will issue ALTER SYSTEM ARCHIVE LOG CURRENT there."
-		dblogin="/@$pridb as sysdba"	#assuming you already saved Oracle Wallet for this currently primary database for user SYS
-	else
-		#it's primary, so archive log switch should be done locally.
-		unset dblogin
-	fi
-	dosql noreturn "ALTER SYSTEM ARCHIVE LOG CURRENT" "$dblogin"
-	#TODO: ORA-16014: log xx sequence# xxx not archived, no available destinations
-	#	 	should be ignored (especially for MODE=ARCH - archive log backups)
-	#		This could happen e.g. if there is no space available but we 
-	#				have to run arch log backup anyway...
-}
-
-#----------------------------------------------------------------------------
-
-function dosql {
-	typeset -n retvar=$1
-	login=${3:-/as sysdba}
-	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus $login about to run: $2"
-	retvar=$( $ORACLE_HOME/bin/sqlplus -S "$login" <<EOF
-WHENEVER OSERROR EXIT 5;
-WHENEVER SQLERROR EXIT SQL.SQLCODE;
-set echo off head off feed off newpage none pagesize 1000 linesize 200
-$2;
-exit;
-EOF
-		)
-	#adding RMAN-00000 in case of errors so it will be catched by check_and_email_results() in case of errors
-	sqlplus_retcode=$?
-	if [ $sqlplus_retcode -eq 5 ] ; then
-		echo "ERROR: RMAN-00000: An OS error happened while running sqlplus script: $retvar"
-		unset retvar
-	elif [ $sqlplus_retcode -ne 0 ] ; then
-		echo "ERROR: RMAN-00000: An SQL error happened while running sqlplus script: $retvar"
-		unset retvar
-	else
-		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
-	fi
-}
-
-#-------------------------------------------
+#------------------------------------------------------------------
+# === Checks and info before backups run ==========================
+#------------------------------------------------------------------
 
 function get_database_info
 {	#1. get Oracle release number
@@ -104,41 +51,7 @@ function get_database_info
 	fi
 }
 
-function report_backup_size
-{	[ $Ver10up -ne 1 ] && return 0		#V$RMAN_OUTPUT and V$RMAN_STATUS are 10g+
-
-	#1. Get the first backup piece handle. Line format is different in debug and non-debug mode, e.g. respectively:
-	#RMAN-08530: piece handle=igp6dj9m_1_1 tag=ARCH_LOGS comment=API Version 2.0,MMS Version 9.0.0.84
-	#piece handle=dip6a1do_1_1 tag=ARCH_LOGS comment=API Version 2.0,MMS Version 9.0.0.84
-	handle=`egrep "^(RMAN-08530: )?piece handle=" $LOGFILE | head -n 1 | cut -d "=" -f 2 | cut -d " " -f 1`
-	if [ "x$handle" = "x" ] ; then
-		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: report_backup_size: can't find piece handle in the log file."
-		return
-	fi
-
-	#2. Query parent (session/rman) row from $RMAN_STATUS for the total backup size.
-	dosql used_mb "variable handle VARCHAR2(120);
-begin  :handle := '$handle';
-end;
-/
-	WITH q AS (
-        SELECT /*+ rule */
-                 ROUND(SUM(INPUT_BYTES)/1024/1024,1) inp_mb, ROUND(SUM(OUTPUT_BYTES)/1024/1024,1) out_mb
-        FROM V\$RMAN_STATUS 
-        WHERE ROW_TYPE='SESSION' and OPERATION='RMAN'
-        START WITH (RECID, STAMP) =
-              --(SELECT MAX(session_recid),MAX(session_stamp) FROM V\$RMAN_OUTPUT)
-			  (SELECT /*+ rule */ s2.parent_recid, s2.parent_stamp 
-               FROM sys.V_\$BACKUP_PIECE p JOIN V\$RMAN_STATUS s2 ON (p.rman_status_recid=s2.recid AND p.rman_status_stamp=s2.stamp) 
-				WHERE handle=:handle)
-        CONNECT BY PRIOR RECID = PARENT_RECID AND PRIOR STAMP = PARENT_STAMP
-	) SELECT  'Backed up '|| TRIM(TO_CHAR(inp_mb,'99,999,999.9')) ||' Mb of data'
-        ||CASE WHEN out_mb>0.1 and inp_mb/out_mb>1.02 THEN ' (output size is '||TRIM(TO_CHAR(out_mb,'99,999,999.9'))||' Mb)' END
-        ||'.' as size_msg 
-	FROM q"
-	#Reported output size is smaller for incremental backups and/or for backups with enabled compression.
-	echo "INFO: $used_mb"
-}
+#-------------------------------------------
 
 function check_best_practices {
 	dosql ctlf_record_keep_time "select value from v\$parameter where name='control_file_record_keep_time'"
@@ -147,11 +60,10 @@ function check_best_practices {
 		echo "WARN: Recommended value is $(( $RECOVERY_WINDOW +10 )) based on your recovery window and Oracle Note 829755.1."
 		if [ "$FIX_BEST_PRACTICES" -eq "1" ] ; then
 			dosql noreturn "ALTER SYSTEM SET CONTROL_FILE_RECORD_KEEP_TIME=$(( $RECOVERY_WINDOW +10 )) scope=BOTH"
-			echo "WARN: Fixed!"
+			echo "WARN: CONTROL_FILE_RECORD_KEEP_TIME fixed."
 		fi
 	fi
 }
-
 
 #-------------------------------------------
 
@@ -189,126 +101,15 @@ EMAIL
 $FRA_USAGE
 EMAIL
 	fi
+
+	#TODO: check if filesystem or ASM diskgroup where FRA is based has *more*
+	#		free space than the FRA itself!
 }
 
-#-------------------------------------------
 
-function email {
-	subject=$1
-	mailx -s "$db@$HOSTNAME $subject *****" $DBA_EMAIL
-	echo "INFO: email with subject '$subject' sent to $DBA_EMAIL at `date`"
-}
-
-#-------------------------------------------
-
-function check_and_email_results {
-	rman_ignore_regex="WARNING: |RMAN-005(69|71): ==="
-	#List of RMAN errors to ignore: 1) all warnings;
-	#and 2) RMAN-00571 and RMAN-00569 are just used for RMAN error stack header (formatting)
-
-	#3) for Commvault, also ignore RMAN-06525: RMAN retention policy is set to none
-	#					and RMAN-03002: failure of report command
-	[ "x$BACKUP_TYPE" = 'xCommvault' ] &&
-		rman_ignore_regex="$rman_ignore_regex|RMAN-0(3002|6525)"
-
-	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: RMAN errors to ignore regexp=$rman_ignore_regex"
-
-	#count number of RMAN errors:
-	errcount=`egrep "RMAN-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |wc -l`
-	if [ $errcount -ne 0 ] ; then
-		echo "Errors ($errcount) detected in $db rman backup"
-		email "RMAN errors" <<EMAIL
-	Log file $LOGFILE
-	Errors:
-`egrep "(RMAN|ORA)-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |tail -n 15`
-
-	RMAN script used:
-	$SCRIPT
-
-First 200 lines from the log file:
-
-`head -n 200 $LOGFILE`
-
-....
-EMAIL
-		return
-	fi
-
-	#rest of the subroutine assumes no RMAN/ORA errors
-	case $MODE in
-		ARCH|CTRL)		;;	#no "ok" emails for archived logs and control file backups
-		XCHK) #email for crosscheck and report results:
-				email "IMPORTANT: database recoverability reports!" <<EMAIL
-Here are the main reports that show database recoverability and RMAN backups status:
-
-`egrep -v "found to be 'AVAILABLE'|backup piece handle=|validation succeeded for archived log|archived log file name=" $LOGFILE`
-
-For more details look at log file $LOGFILE on `hostname`.
-EMAIL
-			;;
-		*)	#email for all normal FULL/INCR backups:
-				#wc with redirection (<) does not print file name vs argumented filename
-				if [ `wc -l < $LOGFILE` -le 350 ] ; then
-					#If log file is smaller than 350 lines, email it completely:
-					email "RMAN backup complete" <<EMAIL
-Complete contents of the log file $LOGFILE:
-`cat $LOGFILE`
-EMAIL
-				else
-					email "RMAN backup complete" <<EMAIL
-First 200 and last 100 lines from log file $LOGFILE:
-`head -n 200 $LOGFILE`
-
-....
-
-`tail -n 100 $LOGFILE`
-EMAIL
-				fi
-			;;
-	esac
-}
-
-#-------------------------------------------
-
-RENICE_SLEEP=25					#How many seconds to wait before attempt to renice 
-RENICE_WAITS=10					#How many attempts to wait for rman channels to start, before renice.
-								#	- So all channels will have time to fully startup.
-
-#This function is used to limit RMAN's ability to hog CPU
-# (especially helpful when used with bzip2 compression - 10g default)
-function renice_rman {
-	#TODO: renice also RMAN channels running in parallel on another RAC nodes 
-	#      (using RAC nodes' password-less ssh setup)
-	c=1; while [[ $c -le $RENICE_WAITS ]]
-	do
-		sleep $RENICE_SLEEP		#wait for all rman channels to start up
-		dosql PIDS "
-			SELECT p.spid  FROM  v\$session s join v\$process p on (s.paddr = p.addr)
-			WHERE  lower(s.client_info) like 'rman%'
-			   AND lower(s.program)     like 'rman@%'
-			   AND lower(s.module)      like 'backup%'
-			   AND s.logon_time > SYSDATE-$RENICE_SLEEP*$RENICE_WAITS/86400"
-		PIDS2=`echo "$PIDS" | tr "\n" "," | sed 's/,*$//'`
-		if [ "x$PIDS2" = "x" ]; then
-			[ $BACKUP_DEBUG -eq 1 ] && echo "renice_rman(): renice_attempts=$c, no RMAN channels found"
-		else
-			#found processes to renice
-			echo $PIDS | xargs $RENICE
-			echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
-			echo "List of RMAN related processes with PIDs $PIDS2:"
-			ps -o pid,nice,user,time,comm,args -p $PIDS2
-			return
-		fi
-		(( c=c+1 ))
-	done
-	if [[ $c -gt $RENICE_WAITS ]]; then
-		echo "WARN: renice_rman() could not detect active RMAN sessions. Waited too small?"
-	fi
-	#NOTE: On some platforms if RMAN creates LOCAL=YES connection, oracle dedicated processes will
-	#	   inherit nice property from RMAN processes that is already has priority reniced down.
-}
-
-#-------------------------------------------
+#------------------------------------------------------------------
+# === Lock files management =======================================
+#------------------------------------------------------------------
 
 function release_lock {
 	#This function removes lock files and is called directly, or as
@@ -373,7 +174,7 @@ function validate_lock {
 	#The $lock_fname lock file exists too - read hostname and pid from it
 	eval set -A lock_data $(cat $lock_fname)
 	pid=${lock_data[1]};host=${lock_data[0]}
-	echo "INFO: validate_lock: lock file found: checking for process $pid on $host"
+	echo "INFO: validate_lock: lock file found: checking for locking process $pid on $host"
 
 	#validity check 1 - try to ps that process (it will fail if it doesn't exist)
 	remote_lock_uuid=$(proc_uuid $host $pid)
@@ -398,6 +199,7 @@ function validate_lock {
 	See log file $LOGFILE0 for more details:
 	Warning. Lock $lock_fname exists!
 $simul_run_check RMAN function is already running. Exiting...
+
 	Other RMAN script running (host, pid, ppid, user, ruser, rgid, tty, args):
 $remote_lock_uuid
 	Process is confirmed as still running.
@@ -425,42 +227,188 @@ function lock_it {
 	trap release_lock INT TERM		#don't add trap EXIT in a ksh function
 	echo $lock_uuid > $lock_fname
 	if [ $? -eq 0 ] ; then
-		echo "INFO: Acquired lock $lock_fname.lock by pid $$ on $HOSTNAME"
+		echo "INFO: Acquired lock $lock_fname.lock by pid $$ on $HOSTNAME."
 	else
 		echo "WARN: Error writing to $lock_fname. Ignoring."
 		#it is important to run a backup - so just ignoring lock file problem
 	fi
 }
 
-#-------------------------------------------
 
-function report_runtime {
-	S2=$SECONDS
-	typeset -i minutes
-	minutes=$(( ($S2 - $S1)/60 ))
-	seconds=$(( ($S2 - $S1)%60 ))
-	echo "== Backup script took $minutes minutes $seconds seconds to complete."
+#------------------------------------------------------------------
+# === Subsroutines used for backup itself directly ================
+#------------------------------------------------------------------
+
+function prepare_channels {
+	if [ $Ver10up -ne 1 ]; then
+		#For 9i databases only (no FRA):
+		mkdir -p $ONDISK_LOCATION/$db
+		eval "CH_FORMAT=\"FORMAT '$BACKUP_FORMAT'\""		#eval() to expand $db and $tags
+	fi
+
+	c=1; while [[ $c -le $1 ]]
+	do
+		RMAN_CHANNELS="$RMAN_CHANNELS
+			ALLOCATE $2 CHANNEL ch$c $ALLOCATE_PARMS $CH_FORMAT;
+			SETLIMIT CHANNEL ch$c $CHANNEL_SETLIMIT;"
+		RMAN_RELEASE_CHANNELS="$RMAN_RELEASE_CHANNELS
+			RELEASE CHANNEL ch$c;"
+		(( c=c+1 ))
+	done
+}
+
+#maintenance channels are used by CHANGE, DELETE and CROSSCHECK commands.
+function prepare_maintenance_channels {
+	#see ML Note 567555.1
+	#  and http://docs.oracle.com/cd/B19306_01/backup.102/b14194/rcmsynta005.htm
+
+	#no release for maintenance channels
+	RMAN_RELEASE_CHANNELS=""
+
+	#maintenance channel type DISK is always allocated:
+	RMAN_CHANNELS="ALLOCATE CHANNEL FOR MAINTENANCE TYPE DISK;"
+
+	if [ $BACKUP_TYPE != 'DISK' ]; then
+		#SBT only if needed:
+		RMAN_CHANNELS="$RMAN_CHANNELS
+			ALLOCATE CHANNEL FOR MAINTENANCE $ALLOCATE_PARMS;"
+	fi
+}
+
+function rman_pri_configures {
+	#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
+	#This could lead to standby having different retention policy from primary.
+	if [ "x$DB_ROLE" != 'xPRIMARY' ]; then
+		return
+	fi
+	SCRIPT="$RMAN_PRI_CONFIGURES
+			$SCRIPT"
+
+	if [ "x$DG" != 'xDG' ]; then
+		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY CLEAR;
+					$SCRIPT"
+		return
+	fi
+
+	#APPLIED ON STANDBY works on 10g/11g, but APPLIED ON ALL STANDBY is 11g only.
+	#You should put any other configures into $RMAN_HEADER_SCRIPT, so it'll be applied to standby also.
+	if [ "$Release" -le "10" ] ; then
+		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON STANDBY;
+				$SCRIPT"
+		#In 10g DG you also want to set following according to DOC Id 728053.1
+		#ALTER SYSTEM SET "_LOG_DELETION_POLICY"='ALL' SCOPE=SPFILE;
+		#TODO: add to check_best_practices() function?
+	else
+		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
+				$SCRIPT"
+	fi
 }
 
 #-------------------------------------------
 
-function parse_params {
-	eval set -A params $(echo $db | tr ':' ' ')
-	db=${params[0]}
-	DG=${params[1]}
+function archive_log_current {
+	if [ "x$DB_ROLE" = "xSTANDBY" ]; then
+		#If we are here, then it is a standby database.
+		#TODO: check. looks like 11.2.0.4+ tries to switchlog on primary automatically!?
+		dosql pridb 'SELECT PRIMARY_DB_UNIQUE_NAME FROM V$DATABASE'
+		if [ "x$pridb" = "x" ]; then
+			echo "WARN: There is no value in v$database.PRIMARY_DB_UNIQUE_NAME for $db database."
+			echo "Did this database ever received redo from primary database? Read http://goo.gl/CiV9Tl for PRIMARY_DB_UNIQUE_NAME"
+			echo "Continuing backup, but *** THIS HAS TO BE FIXED ***"
+			return
+		fi
+		echo "INFO: Current primary database is $pridb. Will issue ALTER SYSTEM ARCHIVE LOG CURRENT there."
+		dblogin="/@$pridb as sysdba"	#assuming you already saved Oracle Wallet for this currently primary database for user SYS
+	else
+		#it's primary, so archive log switch should be done locally.
+		unset dblogin
+	fi
+	dosql noreturn "ALTER SYSTEM ARCHIVE LOG CURRENT" "$dblogin"
+	#TODO: ORA-16014: log xx sequence# xxx not archived, no available destinations
+	#	 	should be ignored (especially for MODE=ARCH - archive log backups)
+	#		This could happen e.g. if there is no space available but we 
+	#				have to run arch log backup anyway...
 }
 
 #-------------------------------------------
 
-function remove_old_files {
-	echo "Deleting old log files..."
-	find $BASE_PATH/log \(    -mtime +65 -name "rmanbackup*.log" \
-						   -o -mtime +4  -name "rmanbackup*.rman-trace" \
-						 \) -print -exec rm {} \;
-	find $BASE_PATH/scripts \(   -mtime +65 -name "rmanclone_*.sh" \
-						   -o -mtime +35  -name "controlf-*.ctl-bkpcopy" \
-						   -o -mtime +65  -name "*.*-bkpcopy" \
-						 \) -print -exec rm {} \;
+RENICE_SLEEP=25		#How many seconds to wait before attempt to renice 
+RENICE_WAITS=10		#How many attempts to wait for rman channels to start
+					#	- So all channels will have time to fully startup.
+
+#This function is used to limit RMAN's ability to hog CPU
+# (especially helpful when used with bzip2 compression - 10g default)
+function renice_rman {
+	#TODO: renice also RMAN channels running in parallel on another RAC nodes 
+	#      (using RAC nodes' password-less ssh setup)
+	c=1; while [[ $c -le $RENICE_WAITS ]]
+	do
+		sleep $RENICE_SLEEP		#wait for all rman channels to start up
+		dosql PIDS "
+			SELECT p.spid  FROM  v\$session s join v\$process p on (s.paddr = p.addr)
+			WHERE  lower(s.client_info) like 'rman%'
+			   AND lower(s.program)     like 'rman@%'
+			   AND lower(s.module)      like 'backup%'
+			   AND s.logon_time > SYSDATE-$RENICE_SLEEP*$RENICE_WAITS/86400"
+		PIDS2=`echo "$PIDS" | tr "\n" "," | sed 's/,*$//'`
+		if [ "x$PIDS2" = "x" ]; then
+			[ $BACKUP_DEBUG -eq 1 ] && echo "renice_rman(): renice_attempts=$c, no RMAN channels found"
+		else
+			#found processes to renice
+			echo $PIDS | xargs $RENICE
+			echo "INFO: Reniced Oracle processes participating in RMAN backup to lower priority."
+			echo "List of RMAN related processes with PIDs $PIDS2:"
+			ps -o pid,nice,user,time,comm,args -p $PIDS2
+			return
+		fi
+		(( c=c+1 ))
+	done
+	if [[ $c -gt $RENICE_WAITS ]]; then
+		echo "WARN: renice_rman() could not detect active RMAN sessions. Waited too small?"
+	fi
+	#NOTE: On some platforms if RMAN creates LOCAL=YES connection, oracle dedicated processes will
+	#	   inherit nice property from RMAN processes that is already has priority reniced down.
+}
+
+
+#------------------------------------------------------------------
+# === Checks, info and actions after backup ran ===================
+#------------------------------------------------------------------
+
+function report_backup_size
+{	[ $Ver10up -ne 1 ] && return 0		#V$RMAN_OUTPUT and V$RMAN_STATUS are 10g+
+
+	#1. Get the first backup piece handle. Line format is different in debug and non-debug mode, e.g. respectively:
+	#RMAN-08530: piece handle=igp6dj9m_1_1 tag=ARCH_LOGS comment=API Version 2.0,MMS Version 9.0.0.84
+	#piece handle=dip6a1do_1_1 tag=ARCH_LOGS comment=API Version 2.0,MMS Version 9.0.0.84
+	handle=`egrep "^(RMAN-08530: )?piece handle=" $LOGFILE | head -n 1 | cut -d "=" -f 2 | cut -d " " -f 1`
+	if [ "x$handle" = "x" ] ; then
+		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: report_backup_size: can't find piece handle in the log file."
+		return
+	fi
+
+	#2. Query parent (session/rman) row from $RMAN_STATUS for the total backup size.
+	dosql used_mb "variable handle VARCHAR2(120);
+begin  :handle := '$handle';
+end;
+/
+	WITH q AS (
+        SELECT /*+ rule */
+                 ROUND(SUM(INPUT_BYTES)/1024/1024,1) inp_mb, ROUND(SUM(OUTPUT_BYTES)/1024/1024,1) out_mb
+        FROM V\$RMAN_STATUS 
+        WHERE ROW_TYPE='SESSION' and OPERATION='RMAN'
+        START WITH (RECID, STAMP) =
+              --(SELECT MAX(session_recid),MAX(session_stamp) FROM V\$RMAN_OUTPUT)
+			  (SELECT /*+ rule */ s2.parent_recid, s2.parent_stamp 
+               FROM sys.V_\$BACKUP_PIECE p JOIN V\$RMAN_STATUS s2 ON (p.rman_status_recid=s2.recid AND p.rman_status_stamp=s2.stamp) 
+				WHERE handle=:handle)
+        CONNECT BY PRIOR RECID = PARENT_RECID AND PRIOR STAMP = PARENT_STAMP
+	) SELECT  'Backed up '|| TRIM(TO_CHAR(inp_mb,'99,999,999.9')) ||' Mb of data'
+        ||CASE WHEN out_mb>0.1 and inp_mb/out_mb>1.02 THEN ' (output size is '||TRIM(TO_CHAR(out_mb,'99,999,999.9'))||' Mb)' END
+        ||'.' as size_msg 
+	FROM q"
+	#Reported output size is smaller for incremental backups and/or for backups with enabled compression.
+	echo "INFO: $used_mb"
 }
 
 #-------------------------------------------
@@ -542,71 +490,145 @@ CLONESCRIPT
 	echo "INFO: RMAN clone script generated as $clone_script"
 }
 
-#----------------------------------------------------------------------------
+#-------------------------------------------
 
-function prepare_channels {
-	if [ $Ver10up -ne 1 ]; then
-		#For 9i databases only (no FRA):
-		mkdir -p $ONDISK_LOCATION/$db
-		eval "CH_FORMAT=\"FORMAT '$BACKUP_FORMAT'\""		#eval() to expand $db and $tags
-	fi
+function check_and_email_results {
+	rman_ignore_regex="WARNING: |RMAN-005(69|71): ==="
+	#List of RMAN errors to ignore: 1) all warnings;
+	#and 2) RMAN-00571 and RMAN-00569 are just used for RMAN error stack header (formatting)
 
-	c=1; while [[ $c -le $1 ]]
-	do
-		RMAN_CHANNELS="$RMAN_CHANNELS
-			ALLOCATE $2 CHANNEL ch$c $ALLOCATE_PARMS $CH_FORMAT;
-			SETLIMIT CHANNEL ch$c $CHANNEL_SETLIMIT;"
-		RMAN_RELEASE_CHANNELS="$RMAN_RELEASE_CHANNELS
-			RELEASE CHANNEL ch$c;"
-		(( c=c+1 ))
-	done
-}
+	#3) for Commvault, also ignore RMAN-06525: RMAN retention policy is set to none
+	#					and RMAN-03002: failure of report command
+	[ "x$BACKUP_TYPE" = 'xCommvault' ] &&
+		rman_ignore_regex="$rman_ignore_regex|RMAN-0(3002|6525)"
 
-#maintenance channels are used by CHANGE, DELETE and CROSSCHECK commands.
-function prepare_maintenance_channels {
-	#see ML Note 567555.1
-	#  and http://docs.oracle.com/cd/B19306_01/backup.102/b14194/rcmsynta005.htm
+	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: RMAN errors to ignore regexp=$rman_ignore_regex"
 
-	#no release for maintenance channels
-	RMAN_RELEASE_CHANNELS=""
+	#count number of RMAN errors:
+	errcount=`egrep "RMAN-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |wc -l`
+	if [ $errcount -ne 0 ] ; then
+		echo "Errors ($errcount) detected in $db rman backup"
+		email "RMAN errors" <<EMAIL
+	Log file $LOGFILE
+	Errors:
+`egrep "(RMAN|ORA)-[0-9]" $LOGFILE | egrep -v "$rman_ignore_regex" |tail -n 15`
 
-	#maintenance channel type DISK is always allocated:
-	RMAN_CHANNELS="ALLOCATE CHANNEL FOR MAINTENANCE TYPE DISK;"
+	RMAN script used:
+	$SCRIPT
 
-	if [ $BACKUP_TYPE != 'DISK' ]; then
-		#SBT only if needed:
-		RMAN_CHANNELS="$RMAN_CHANNELS
-			ALLOCATE CHANNEL FOR MAINTENANCE $ALLOCATE_PARMS;"
-	fi
-}
+First 200 lines from the log file:
 
-function rman_pri_configures {
-	#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
-	#This could lead to standby having different retention policy from primary.
-	if [ "x$DB_ROLE" != 'xPRIMARY' ]; then
-		return
-	fi
-	SCRIPT="$RMAN_PRI_CONFIGURES
-			$SCRIPT"
+`head -n 200 $LOGFILE`
 
-	if [ "x$DG" != 'xDG' ]; then
-		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY CLEAR;
-					$SCRIPT"
+....
+EMAIL
 		return
 	fi
 
-	#APPLIED ON STANDBY works on 10g/11g, but APPLIED ON ALL STANDBY is 11g only.
-	#You should put any other configures into $RMAN_HEADER_SCRIPT, so it'll be applied to standby also.
-	if [ "$Release" -le "10" ] ; then
-		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON STANDBY;
-				$SCRIPT"
-		#In 10g DG you also want to set following according to DOC Id 728053.1
-		#ALTER SYSTEM SET "_LOG_DELETION_POLICY"='ALL' SCOPE=SPFILE;
-		#TODO: add to check_best_practices() function?
+	#rest of the subroutine assumes no RMAN/ORA errors
+	case $MODE in
+		ARCH|CTRL)		;;	#no "ok" emails for archived logs and control file backups
+		XCHK) #email for crosscheck and report results:
+				email "IMPORTANT: database recoverability reports!" <<EMAIL
+Here are the main reports that show database recoverability and RMAN backups status:
+
+`egrep -v "found to be 'AVAILABLE'|backup piece handle=|validation succeeded for archived log|archived log file name=" $LOGFILE`
+
+For more details look at log file $LOGFILE on `hostname`.
+EMAIL
+			;;
+		*)	#email for all normal FULL/INCR backups:
+				#wc with redirection (<) does not print file name vs argumented filename
+				if [ `wc -l < $LOGFILE` -le 350 ] ; then
+					#If log file is smaller than 350 lines, email it completely:
+					email "RMAN backup complete" <<EMAIL
+Complete contents of the log file $LOGFILE:
+`cat $LOGFILE`
+EMAIL
+				else
+					email "RMAN backup complete" <<EMAIL
+First 200 and last 100 lines from log file $LOGFILE:
+`head -n 200 $LOGFILE`
+
+....
+
+`tail -n 100 $LOGFILE`
+EMAIL
+				fi
+			;;
+	esac
+}
+
+#-------------------------------------------
+
+function report_runtime {
+	S2=$SECONDS
+	typeset -i minutes
+	minutes=$(( ($S2 - $S1)/60 ))
+	seconds=$(( ($S2 - $S1)%60 ))
+	echo "== Backup script took $minutes minutes $seconds seconds to complete."
+}
+
+#-------------------------------------------
+
+function remove_old_files {
+	echo "INFO: Deleting old log files..."
+	find $BASE_PATH/log \(    -mtime +65 -name "rmanbackup*.log" \
+						   -o -mtime +4  -name "rmanbackup*.rman-trace" \
+						 \) -print -exec rm {} \;
+	find $BASE_PATH/scripts \(   -mtime +65 -name "rmanclone_*.sh" \
+						      -o -mtime +35  -name "controlf-*.ctl-bkpcopy" \
+						      -o -mtime +65  -name "*.*-bkpcopy" \
+						 \) -print -exec rm {} \;
+}
+
+
+#------------------------------------------------------------------
+# === Basic functions =============================================
+#------------------------------------------------------------------
+
+function dosql {
+	typeset -n retvar=$1
+	login=${3:-/as sysdba}
+	[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus $login about to run: $2"
+	retvar=$( $ORACLE_HOME/bin/sqlplus -S "$login" <<EOF
+WHENEVER OSERROR EXIT 5;
+WHENEVER SQLERROR EXIT SQL.SQLCODE;
+set echo off head off feed off newpage none pagesize 1000 linesize 200
+$2;
+exit;
+EOF
+		)
+	#adding RMAN-00000 in case of errors so it will be catched by check_and_email_results() in case of errors
+	sqlplus_retcode=$?
+	if [ $sqlplus_retcode -eq 5 ] ; then
+		echo "ERROR: RMAN-00000: An OS error happened while running sqlplus script: $retvar"
+		unset retvar
+	elif [ $sqlplus_retcode -ne 0 ] ; then
+		echo "ERROR: RMAN-00000: An SQL error happened while running sqlplus script: $retvar"
+		unset retvar
 	else
-		SCRIPT="CONFIGURE ARCHIVELOG DELETION POLICY TO APPLIED ON ALL STANDBY;
-				$SCRIPT"
+		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: sqlplus returned $retvar"
 	fi
+}
+
+#-------------------------------------------
+
+function email {
+	subject=$1
+	mailx -s "$db@$HOSTNAME $subject *****" $DBA_EMAIL
+	echo "INFO: email with subject '$subject' sent to $DBA_EMAIL at `date`"
+}
+
+
+#------------------------------------------------------------------
+# === Global variables management =================================
+#------------------------------------------------------------------
+
+function parse_params {
+	eval set -A params $(echo $db | tr ':' ' ')
+	db=${params[0]}
+	DG=${params[1]}
 }
 
 #-------------------------------------------
@@ -628,6 +650,14 @@ function reset_global_vars {
 
 	#Use Oracle's oraenv to set oracle environment variables for current SID
 	ORACLE_SID=$db
+	#Check if ORACLE_SID is correct, so oraenv will not hang asking for correct ORACLE_SID
+	#  (ORAENV_ASK doesn't control this)
+	ORACLE_HOME=`awk -F: '{if ($1 == "'$ORACLE_SID'") {print $2; exit}}' $ORATAB 2>/dev/null`
+	if [ "x$ORACLE_HOME" = "x" ]; then
+		echo "ERROR: RMAN-00000: $ORACLE_SID is not found in $ORATAB on $HOSTNAME. Skipping this database."
+		return 1
+	fi
 	ORAENV_ASK=NO
 	. oraenv
+	echo "INFO: ORACLE_HOME=$ORACLE_HOME"
 }

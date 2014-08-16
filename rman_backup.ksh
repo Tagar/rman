@@ -3,8 +3,8 @@
 #------------------------------------------------------------------
 # ********* RMAN backups script	 	rman_backup.ksh ***************
 #
-# See rman_backup.info for Script Functionality, Version History 
-# and other documentation.
+# See rman_backup.info for Script functionality and general information.
+# See rman_docs.txt for references to Oracle documentation.
 #
 # Supported - Oracle releases: tested on 9i, 10g and 11g databases;
 #     		- platforms: Linux, AIX 5.1+, (HP-UX 11.11 - support discontinued)
@@ -219,7 +219,7 @@ cd $BASE_PATH; orig_PATH=$PATH
 mkdir -p $BASE_PATH/log $BASE_PATH/scripts $BASE_PATH/lock
 
 LOGFILE0=$BASE_PATH/log/rmanbackup_`date '+%Y%m'`.log
-{	echo "===== Starting $* @ `date` pid=$$...."	
+{	echo "===== Starting $* pid=$$ @ `date` ...."	
 
 	case $1 in
 		FULL|INCR|DB)		simul_run_check="DB"
@@ -251,6 +251,7 @@ do
 	#-----------------------------------------------
 	{	echo "===== Starting $MODE for $db @ `date`...."
 		reset_global_vars
+		[ $? -ne 0 ] && continue	#if $db isn't found in $ORATAB
 
 		get_database_info
 		check_best_practices
@@ -310,7 +311,7 @@ done
 {	release_lock
 	remove_old_files
 
-	echo "===== Finished @ `date` pid=$$...."	
+	echo "===== Finished backup with pid=$$ @ `date` ...."	
 } 2>&1 >> $LOGFILE0
 
 

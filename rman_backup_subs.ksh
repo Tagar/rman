@@ -43,7 +43,7 @@ function get_database_info
 		#6. Check if Flashback Database is enabled
 		dosql FLASHBACK "SELECT DECODE(FLASHBACK_ON, 'YES','ENABLED', 'DISABLED') FROM V\$DATABASE"
 		if [ $FLASHBACK = 'ENABLED' ]; then
-			dosql FLASH_RET "SELECT trunc(value/60)||' hours and '||mod(value,60)||' minutes' FROM V\$PARAMETER WHERE NAME='db_flashback_retention_target'"
+			dosql FLASH_RET "SELECT TRUNC(value/60)||' hours and '||mod(value,60)||' minutes' FROM V\$PARAMETER WHERE NAME='db_flashback_retention_target'"
 			echo "INFO: Database Flashback: $FLASHBACK, retention target is $FLASH_RET"
 		else
 			echo "INFO: Database Flashback: $FLASHBACK"
@@ -106,6 +106,72 @@ EMAIL
 	#		free space than the FRA itself!
 }
 
+#-------------------------------------------
+
+function DataGuard_check_and_prepare
+{	#For DG databases we should connect using TNS (not just target=/), see Doc ID 1604302.1
+	#Assuming Oracle Wallet is already setup, for user SYS
+	rman_target="/@$db"
+
+	case $DB_ROLE in
+		PRIMARY)
+			check_primary_DG_health
+			if [ ! -z "$outofsync_standbys" ]; then
+				echo "WARN: Because of DG out-of-sync issue, this Primary will be used for backups."
+			else
+				#Only if secondary is in sync, it will be used to offload backups.
+				echo "INFO: $db is part of DG cluster. Standby database will be used for backup activities."
+				if [ "x$MODE" = 'xXCHK' ]; then
+					echo "INFO: Exiting."
+					continue	#next database
+				else
+					echo "INFO: Backup type change: $MODE -> CTRL"
+					echo "INFO: Only control file and spfile backups will run on primary instance."
+					MODE="CTRL"		#primary DG db: will run only control and spfile file backups
+				fi
+			fi
+			;;
+		STANDBY)
+			check_standby_DG_health
+			#TODO: if standby apply has fallen too far, don't do a stale backup?
+			;;
+	esac
+}
+
+function check_primary_DG_health
+{	#Check if secondary database(s) are synchronized with this Primary database
+	dosql outofsync_standbys "SELECT DB_UNIQUE_NAME||' - '||SYNCHRONIZATION_STATUS FROM V\$ARCHIVE_DEST_STATUS WHERE TYPE<>'LOCAL' AND SYNCHRONIZATION_STATUS<>'OK' AND STATUS NOT IN ('INACTIVE','DEFERRED')"
+	#TODO: check for multiple-line result?
+	if [ -z "$outofsync_standbys" ]; then
+		echo "INFO: Primary DG health check: there are no out-of-sync secondaries."
+	else
+		echo "WARN: Out-of-sync DG secondaries: $outofsync_standbys."
+	fi
+}
+
+function check_standby_DG_health
+{	#Check if this Secondary database is synchronized with Primary
+	dosql pridb 'SELECT PRIMARY_DB_UNIQUE_NAME FROM V$DATABASE'
+	dblogin="/@$pridb as sysdba"
+	#1. Get latest generated sequence# from *primary* database
+	dosql last_generated_seq 'SELECT MAX(SEQUENCE#) FROM V$ARCHIVED_LOG VAL, V$DATABASE VDB WHERE VAL.RESETLOGS_CHANGE# = VDB.RESETLOGS_CHANGE#' "$dblogin"
+	#2. Get latest received sequence# on this secondary database
+	dosql last_received_seq 'SELECT MAX(SEQUENCE#) FROM V$ARCHIVED_LOG VAL, V$DATABASE VDB WHERE VAL.RESETLOGS_CHANGE# = VDB.RESETLOGS_CHANGE#'
+	#3. Get latest applied sequence# on this secondary database
+	dosql last_applied_seq 'SELECT DISTINCT FHRBA_SEQ FROM X$KCVFH'
+	#Note: a reference to X$KCVFH was received from Oracle Support on one of SRs. 
+	#      A more documented way would be using query : SELECT MAX(SEQUENCE#) FROM V$ARCHIVED_LOG VAL, 
+	#      V$DATABASE VDB WHERE VAL.RESETLOGS_CHANGE# = VDB.RESETLOGS_CHANGE# AND VAL.APPLIED IN ('YES','IN-MEMORY') 
+	#      instead, but the latter fails if standby redo apply has fallen too far behind, so v$archived_log already 
+	#	   doesn't have a record for latest applied log.
+	if [ $(( $last_received_seq +2 )) -lt $last_generated_seq  \
+	   -o $(( $last_applied_seq +2 )) -lt $last_generated_seq  ]; then
+		echo "WARN: Standby $db is out of sync of $pridb primary seq# $last_generated_seq: latest received  $last_received_seq, latest applied $last_applied_seq."
+		return 1
+	fi
+	echo "INFO: $pridb -> $db DG apply is healthy: primary seq# $last_generated_seq, secondary received $last_received_seq and applied $last_applied_seq."
+}
+
 
 #------------------------------------------------------------------
 # === Lock files management =======================================
@@ -129,13 +195,13 @@ function release_lock {
 			return
 		fi
 		#2. remove lock file
-		rm $lock_fname
+		rm -f $lock_fname
 	else
 		echo "WARN: release_lock(): Lock $lock_fname doesn't exist."
 	fi
 
 	#3. finally, remove symlink to the lock file
-	rm $lock_fname.lock 2>/dev/null
+	rm -f $lock_fname.lock 2>/dev/null
 	echo "INFO: Released lock $lock_fname.lock by pid $$ on $HOSTNAME."
 	unset lock_fname lock_uuid
 }
@@ -195,7 +261,9 @@ function validate_lock {
 
 	#If we are here - lock file is valid. Exit nicely
 	echo "WARN: Lock $lock_fname.lock exists; Other RMAN process is still running. Exiting"
-	email "RMAN scripts schedule overlap" <<EMAIL
+	if [ "x$host" = "x$HOSTNAME" ]; then
+		#send email only if schedule overlap on the same host.
+		email "RMAN scripts schedule overlap" <<EMAIL
 	See log file $LOGFILE0 for more details:
 	Warning. Lock $lock_fname exists!
 $simul_run_check RMAN function is already running. Exiting...
@@ -204,6 +272,9 @@ $simul_run_check RMAN function is already running. Exiting...
 $remote_lock_uuid
 	Process is confirmed as still running.
 EMAIL
+	else
+		[ $BACKUP_DEBUG -eq 1 ] && echo "DEBUG: Email hasn't been sent because schedule conflicts with another host."
+	fi
 	unset lock_fname lock_uuid
 	exit 1
 }
@@ -629,6 +700,7 @@ function parse_params {
 	eval set -A params $(echo $db | tr ':' ' ')
 	db=${params[0]}
 	DG=${params[1]}
+	orig_MODE=$MODE
 }
 
 #-------------------------------------------
@@ -638,8 +710,10 @@ function reset_global_vars {
 	unset CLONE_DATANAMES CLONE_TEMPNAMES CLONE_LOGNAMES handle ctlf_record_keep_time
 	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
 	unset p c lines S1 S2 params minutes seconds errcount rman_debug clone_script dt
-	unset sqlplus_retcode BCT FLASHBACK FLASH_RET
+	unset sqlplus_retcode BCT FLASHBACK FLASH_RET outofsync_standbys
 	unset host pid ps_cmd uuid lock_data remote_lock_uuid
+	unset last_generated_seq last_received_seq last_applied_seq
+
 	#Global variables not to clean (they don't change from a database to database): DG
 	#
 	PATH=$orig_PATH:$PATHS

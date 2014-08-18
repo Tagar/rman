@@ -163,7 +163,7 @@ $RMAN_CHANNELS
 CROSSCHECK BACKUP completed after 'SYSDATE-$RECOVERY_WINDOW-5';
 LIST EXPIRED BACKUP;
 
-CROSSCHECK ARCHIVELOG ALL completed after 'SYSDATE–$RECOVERY_WINDOW-5';
+CROSSCHECK ARCHIVELOG ALL completed after 'SYSDATE-$RECOVERY_WINDOW-5';
 LIST EXPIRED ARCHIVELOG ALL;
 
 #-- Report what's affected by certain NOLOGGING operations and can't be recovered
@@ -219,7 +219,7 @@ cd $BASE_PATH; orig_PATH=$PATH
 mkdir -p $BASE_PATH/log $BASE_PATH/scripts $BASE_PATH/lock
 
 LOGFILE0=$BASE_PATH/log/rmanbackup_`date '+%Y%m'`.log
-{	echo "===== Starting $* pid=$$ @ `date` ...."	
+{	echo "===== Starting $* pid=$$ on $HOSTNAME @ `date` ...."	
 
 	case $1 in
 		FULL|INCR|DB)		simul_run_check="DB"
@@ -230,7 +230,6 @@ LOGFILE0=$BASE_PATH/log/rmanbackup_`date '+%Y%m'`.log
 							;;
 		*)					usage	;;
 	esac
-	orig_MODE=$MODE
 
 	#Don't allow to run more than one RMAN shell script of the same function (DB, ARCH or XCHK).
 	lock_it
@@ -257,21 +256,7 @@ do
 		check_best_practices
 
 		if [ "x$DG" = 'xDG' ]; then
-			#for DG databases we should connect using TNS (not just target=/), see Doc ID 1604302.1
-			rman_target="/@$db"
-
-			if [ "x$DB_ROLE" = 'xPRIMARY' ]; then
-					echo "INFO: $db is part of DG cluster. Standby database will be used for backup activities."
-
-					if [ "x$MODE" = 'xXCHK' ]; then
-						echo "INFO: Exiting."
-						continue	#next database
-					else
-						echo "INFO: Backup type change: $MODE -> CTRL"
-						echo "INFO: Only control file and spfile backups will run on primary instance."
-						MODE="CTRL"		#primary DG db: will run only control and spfile file backups
-					fi
-			fi
+			DataGuard_check_and_prepare
 		fi
 
 		echo "INFO: Backup type: $MODE $DG"
@@ -311,7 +296,7 @@ done
 {	release_lock
 	remove_old_files
 
-	echo "===== Finished backup with pid=$$ @ `date` ...."	
+	echo "===== Finished backup with pid=$$ on $HOSTNAME @ `date` ...."	
 } 2>&1 >> $LOGFILE0
 
 

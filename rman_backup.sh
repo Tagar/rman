@@ -17,7 +17,7 @@ BASE_PATH=$( cd "$( dirname "$0" )" && pwd )
 
 #Process server-specific parameters first from rman_backup.ksh.vars
 #If you need to update any type of the script's behaviour - look there first.
-. $BASE_PATH/rman_backup_vars.ksh
+. $BASE_PATH/rman_backup_vars.sh
 
 
 #------------------------------------------------------------------
@@ -52,7 +52,7 @@ fi
 # ******** Functions:								***************
 
 #Load low-level and utility functions rman_backup.ksh.subs:
-. $BASE_PATH/rman_backup_subs.ksh
+. $BASE_PATH/rman_backup_subs.sh
 
 
 #------------------------------------------------------------------

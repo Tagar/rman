@@ -29,18 +29,27 @@ function get_database_info
 	#3. check if this database is a RAC cluster
 	dosql RAC "SELECT CASE WHEN COUNT(*)<=1 THEN 'Single Instance' ELSE 'RAC' END FROM GV\$INSTANCE"
 	echo "INFO: Database Type: $RAC"
+	if [ "x$RAC" = "xRAC" ]; then
+		echo "INFO: Check if $BASE_PATH is shared across RAC cluster nodes."
+		#Snapshot control files and this script's lock files have to be on a shared filesystem.
+		#TODO: actually check this? Not hard to implement.
+	fi
 
 	#4. Show spfile and control files parameters
 	dosql sp_ctlf "SELECT RPAD(UPPER(NAME),rownum*8)||': '||DISPLAY_VALUE FROM V\$PARAMETER WHERE NAME IN ('spfile','control_files') ORDER BY NAME DESC"
 	echo "INFO: $sp_ctlf"
 
+	#5. Get Database name
+	dosql DB_NAME 'SELECT NAME FROM V$DATABASE'
+	echo "INFO: Database Name: $DB_NAME"
+
 	if [ $Ver10up -eq 1 ]; then
-		#5. Show if BCT is enabled
+		#6. Show if BCT is enabled
 		#TODO: Check V$BACKUP_DATAFILE.USED_CHANGE_TRACKING if it was actually used for an incremental backup
 		dosql BCT 'SELECT STATUS FROM V$BLOCK_CHANGE_TRACKING'
 		echo "INFO: Block Change Tracking: $BCT"
 
-		#6. Check if Flashback Database is enabled
+		#7. Check if Flashback Database is enabled
 		dosql FLASHBACK "SELECT DECODE(FLASHBACK_ON, 'YES','ENABLED', 'DISABLED') FROM V\$DATABASE"
 		if [ $FLASHBACK = 'ENABLED' ]; then
 			dosql FLASH_RET "SELECT TRUNC(value/60)||' hours and '||mod(value,60)||' minutes' FROM V\$PARAMETER WHERE NAME='db_flashback_retention_target'"
@@ -346,7 +355,16 @@ function prepare_maintenance_channels {
 	fi
 }
 
-function rman_pri_configures {
+function rman_configures {
+	if [ "x$RAC" = "xRAC" ]; then
+		#RAC requires controlfile snapshot location to be in a shared filesystem that is 
+		#readable by all instances. http://docs.oracle.com/cd/E11882_01/rac.112/e41960/rman.htm#RACAD851
+		#Assuming $BASE_PATH/scripts is on a shared filesystem:
+		SCRIPT="CONFIGURE SNAPSHOT CONTROLFILE NAME TO '$BASE_PATH/scripts/snap_${DB_NAME}.cf';
+			$SCRIPT"
+	fi
+
+	#Rest of CONFIGURE commands can be run only on a database of Primary role.
 	#Read 1519386.1: RMAN-5021 this configuration cannot be changed for a BACKUP or STANDBY.
 	#This could lead to standby having different retention policy from primary.
 	if [ "x$DB_ROLE" != 'xPRIMARY' ]; then
@@ -651,6 +669,7 @@ function remove_old_files {
 						      -o -mtime +35  -name "controlf-*.ctl-bkpcopy" \
 						      -o -mtime +65  -name "*.*-bkpcopy" \
 						 \) -print -exec rm {} \;
+	#TODO: add $BASE_PATH/scripts/snap_*.cf? It would be just one file per database...
 }
 
 
@@ -711,7 +730,7 @@ function reset_global_vars {
 	unset compressed Ver10up Release FRA_PRC_USED_SOFT FRA_PRC_USED_HARD FRA_THRESHOLD pridb 
 	unset p c lines S1 S2 params minutes seconds errcount rman_debug clone_script dt
 	unset sqlplus_retcode BCT FLASHBACK FLASH_RET outofsync_standbys
-	unset host pid ps_cmd uuid lock_data remote_lock_uuid
+	unset host pid ps_cmd uuid lock_data remote_lock_uuid DB_NAME
 	unset last_generated_seq last_received_seq last_applied_seq
 
 	#Global variables not to clean (they don't change from a database to database): DG

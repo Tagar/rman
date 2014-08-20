@@ -124,7 +124,7 @@ function DO_RMAN_BACKUP {
 	esac
 
 	prepare_channels $p
-	rman_pri_configures
+	rman_configures
 
 	SCRIPT="$RMAN_INIT
 RUN {	$RMAN_HEADER_SCRIPT

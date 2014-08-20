@@ -5,7 +5,7 @@
 #	This file stores all site/server-specific variables.
 #
 
-BACKUP_TYPE="Commvault"					#one of: DISK, Commvault or TSM
+BACKUP_TYPE="DISK"					#one of: DISK, Commvault or TSM
 USE_CATALOG=1						#one of: 0 or 1 (if you use RMAN Catalog)
 BACKUP_COMPRESS=0					#one of: 0 or 1 (to turn on RMAN backup compression)
 CUMULATIVE=1						#one of: 0 or 1 (to use CUMULATIVE incremental backups)

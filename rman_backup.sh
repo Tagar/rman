@@ -22,7 +22,7 @@ BASE_PATH=$( cd "$( dirname "$0" )" && pwd )
 
 #------------------------------------------------------------------
 if [ $# -lt 2 ] ; then		#not given enough parameters to script
-	cat <<USAGE
+	cat <<USAGEINFO
 USAGE:  rman_backup.ksh <operation> <SID>[:DG] [<SID>[:DG] <SID>[:DG] ...]
 where <operation> is one of
 	- FULL - make a full DB backup, regardless day of the week.
@@ -36,7 +36,7 @@ where <operation> is one of
 	If you do this, then add both nodes' SYS passwords to Oracle Wallet.
 	
 	See rman_backup.info for more information.
-USAGE
+USAGEINFO
 	exit 1
 fi
 

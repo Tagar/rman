@@ -257,6 +257,7 @@ do
 
 		if [ "x$DG" = 'xDG' ]; then
 			DataGuard_check_and_prepare
+			[ $? -ne 0 ] && continue	#XCHK doesn't run on primary.
 		fi
 
 		echo "INFO: Backup type: $MODE $DG"

@@ -114,27 +114,27 @@ function DataGuard_check_and_prepare
 	rman_target="/@$db"
 
 	case $DB_ROLE in
-		PRIMARY)
-			check_primary_DG_health
-			if [ ! -z "$outofsync_standbys" ]; then
-				echo "WARN: Because of DG out-of-sync issue, this Primary will be used for backups."
+	PRIMARY)
+		check_primary_DG_health
+		if [ ! -z "$outofsync_standbys" ]; then
+			echo "WARN: Because of DG out-of-sync issue, this Primary will be used for backups."
+		else
+			#Only if secondary is in sync, it will be used to offload backups.
+			echo "INFO: $db is part of DG cluster. Standby database will be used for backup activities."
+			if [ "x$MODE" = 'xXCHK' ]; then
+				echo "INFO: Exiting."
+				return 1	#skip current database
 			else
-				#Only if secondary is in sync, it will be used to offload backups.
-				echo "INFO: $db is part of DG cluster. Standby database will be used for backup activities."
-				if [ "x$MODE" = 'xXCHK' ]; then
-					echo "INFO: Exiting."
-					continue	#next database
-				else
-					echo "INFO: Backup type change: $MODE -> CTRL"
-					echo "INFO: Only control file and spfile backups will run on primary instance."
-					MODE="CTRL"		#primary DG db: will run only control and spfile file backups
-				fi
+				echo "INFO: Backup type change: $MODE -> CTRL"
+				echo "INFO: Only control file and spfile backups will run on primary instance."
+				MODE="CTRL"		#primary DG db: will run only control and spfile file backups
 			fi
-			;;
-		STANDBY)
-			check_standby_DG_health
-			#TODO: if standby apply has fallen too far, don't do a stale backup?
-			;;
+		fi
+		;;
+	STANDBY)
+		check_standby_DG_health
+		#TODO: if standby apply has fallen too far, don't do a stale backup?
+		;;
 	esac
 }
 
@@ -143,9 +143,9 @@ function check_primary_DG_health
 	dosql outofsync_standbys "SELECT DB_UNIQUE_NAME||' - '||SYNCHRONIZATION_STATUS FROM V\$ARCHIVE_DEST_STATUS WHERE TYPE<>'LOCAL' AND SYNCHRONIZATION_STATUS<>'OK' AND STATUS NOT IN ('INACTIVE','DEFERRED')"
 	#TODO: check for multiple-line result?
 	if [ -z "$outofsync_standbys" ]; then
-		echo "INFO: Primary DG health check: there are no out-of-sync secondaries."
+		echo "INFO: Primary DG health check: there are no out-of-sync standbys."
 	else
-		echo "WARN: Out-of-sync DG secondaries: $outofsync_standbys."
+		echo "WARN: Out-of-sync DG standbys: $outofsync_standbys."
 	fi
 }
 

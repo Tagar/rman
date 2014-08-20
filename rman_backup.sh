@@ -12,7 +12,7 @@
 # 			- RMAN catalog and non-cataloged backups are supported.
 #
 
-#logs will be in $BASE_PATH/log, generated script in $BASE_PATH/scripts
+#logs will be in $BASE_PATH/log, generated script in $BASE_PATH/scripts and lock files in $BASE_PATH/lock
 BASE_PATH=$( cd "$( dirname "$0" )" && pwd )
 
 #Process server-specific parameters first from rman_backup.ksh.vars
@@ -42,7 +42,7 @@ fi
 
 
 #Only for Dataguarded databases: We need to connect to primary db to archive current log.
-#Oracle Wallet is used to store password for the databases. See end of this script for OW details.
+#Oracle Wallet is used to store password for the databases. See rman_backup.info for OW details.
 
 
 #------------------------------------------------------------------

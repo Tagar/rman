@@ -43,6 +43,10 @@ case `uname` in
 	HP-UX)	HOSTNAME=`hostname`
 			CVLIB='/opt/simpana/Base64/libobk.sl'
 			;;
+	SunOS)	HOSTNAME=`hostname`
+			CVLIB='/opt/simpana/Base64/libobk.so'
+			ORATAB="/var/opt/oracle/oratab"
+			;;
 esac
 
 SBT="DEVICE TYPE 'SBT_TAPE'"
